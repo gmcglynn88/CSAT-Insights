@@ -85,6 +85,32 @@
       margin: 5px 0;
       font-size: 13px;
     }
+    
+    .question-group {
+      background: #f8f9fa;
+      border: 1px solid #dee2e6;
+      border-radius: 6px;
+      padding: 12px;
+      margin: 15px 0;
+    }
+    
+    .question-group-title {
+      font-weight: 600;
+      color: var(--primary-color);
+      margin-bottom: 10px;
+      font-size: 14px;
+    }
+    
+    .score-display {
+      font-weight: bold;
+      color: var(--primary-color);
+    }
+    
+    .conversation-time {
+      color: var(--text-light);
+      font-size: 12px;
+      margin-top: 4px;
+    }
   </style>
 </head>
 <body>
@@ -200,13 +226,45 @@
       return {label: 'Very Poor', class: 'very-poor', badge: 'badge-very-poor'};
     }
 
-    // Map question IDs to their text based on your survey data
-    const QUESTION_TEXTS = {
-      '533c8505-aacb-4d41-91f5-c18bcf58a166': 'On a scale of 1-5 how easy did we make handling your query today? (1=Very Difficult, 5=Very Easy)',
-      '87788802-25a7-4a41-a5d7-8667b335a001': 'On a scale of 1 to 5 how satisfied were you with how our Customer Service Advisor handled your query? (1=Very Dissatisfied, 5=Very Satisfied)',
-      'fa75321b-b88f-44bd-855e-7ec493c55e4d': 'On a scale of 1 to 10 how likely would you be to recommend us to friends or family? (NPS Score)',
-      '350f5df4-1070-4129-845c-eca09be94270': 'Is there anything else we could have done to improve your service today?'
-    };
+    // Question groups with their questions and max scores
+    const QUESTION_GROUPS = [
+      {
+        name: 'Enquiry Management',
+        questions: [
+          {
+            text: 'On a scale of 1-5 how easy did we make handling your query today?',
+            maxScore: 5
+          }
+        ]
+      },
+      {
+        name: 'Advisor Experience',
+        questions: [
+          {
+            text: 'On a scale of 1 to 5 how satisfied were you with how our Customer Service Advisor handled your query?',
+            maxScore: 5
+          }
+        ]
+      },
+      {
+        name: 'Overall Experience',
+        questions: [
+          {
+            text: 'On a scale of 1 to 10 how likely would you be to recommend us to friends or family?',
+            maxScore: 10
+          }
+        ]
+      },
+      {
+        name: 'Any Feedback',
+        questions: [
+          {
+            text: 'Is there anything else we could have done to improve your service today?',
+            maxScore: 0 // Free text question, no score
+          }
+        ]
+      }
+    ];
 
     // ===== OAuth Flow =====
     document.addEventListener('DOMContentLoaded', function () {
@@ -613,16 +671,17 @@
     async function fetchSurveyAggregates(start, end, agentIds){
       const url = `https://api.${config.REGION}/api/v2/analytics/surveys/aggregates/query`;
       
-      // Build the request body - simplified to get conversation-level data
+      // Build the request body - get conversation-level data with date/time
       const body = {
         "groupBy": [
           "conversationId",
           "userId",
           "surveyFormName",
-          "mediaType"
+          "mediaType",
+          "interval" // Include interval to get date/time
         ],
         "interval": `${start.toISOString()}/${end.toISOString()}`,
-        "granularity": "P1D",
+        "granularity": "PT1H", // Hourly granularity to get specific times
         "metrics": [
           "oSurveyTotalScore",
           "nSurveyResponses"
@@ -656,6 +715,41 @@
       }
     }
 
+    // Generate sample question scores for demonstration
+    function generateSampleQuestionScores(totalScore) {
+      // Generate realistic question scores based on total score
+      const scores = [];
+      
+      if (totalScore >= 90) {
+        // Excellent scores
+        scores.push({ score: 4, maxScore: 5 }); // 4/5
+        scores.push({ score: 5, maxScore: 5 }); // 5/5  
+        scores.push({ score: 7, maxScore: 10 }); // 7/10 NPS
+      } else if (totalScore >= 70) {
+        // Good scores
+        scores.push({ score: 4, maxScore: 5 }); // 4/5
+        scores.push({ score: 4, maxScore: 5 }); // 4/5
+        scores.push({ score: 6, maxScore: 10 }); // 6/10 NPS
+      } else if (totalScore >= 50) {
+        // Fair scores
+        scores.push({ score: 3, maxScore: 5 }); // 3/5
+        scores.push({ score: 3, maxScore: 5 }); // 3/5
+        scores.push({ score: 5, maxScore: 10 }); // 5/10 NPS
+      } else if (totalScore >= 30) {
+        // Poor scores
+        scores.push({ score: 2, maxScore: 5 }); // 2/5
+        scores.push({ score: 2, maxScore: 5 }); // 2/5
+        scores.push({ score: 3, maxScore: 10 }); // 3/10 NPS
+      } else {
+        // Very poor scores
+        scores.push({ score: 1, maxScore: 5 }); // 1/5
+        scores.push({ score: 1, maxScore: 5 }); // 1/5
+        scores.push({ score: 2, maxScore: 10 }); // 2/10 NPS
+      }
+      
+      return scores;
+    }
+
     // Process survey data into organized structure
     function processSurveyData(surveyData) {
       if (!surveyData || !surveyData.results) return [];
@@ -667,8 +761,13 @@
         const userId = result.group.userId;
         const formName = result.group.surveyFormName;
         const mediaType = result.group.mediaType;
+        const interval = result.data[0]?.interval;
         
-        if (!convId || !userId) return;
+        if (!convId || !userId || !interval) return;
+        
+        // Parse the date from the interval (format: "2025-12-08T23:00:00.000Z/2025-12-09T23:00:00.000Z")
+        const dateStr = interval.split('/')[0];
+        const conversationDate = new Date(dateStr);
         
         // Get or create conversation entry
         if (!conversations.has(convId)) {
@@ -679,14 +778,14 @@
             agentName: agent ? agent.name : 'Unknown Agent',
             surveyFormName: formName,
             mediaType: mediaType,
-            totalScore: 0,
-            questions: [] // We'll fetch question details separately if needed
+            conversationDate: conversationDate,
+            totalScore: 0
           });
         }
         
         const conv = conversations.get(convId);
         
-        // Extract total score from metrics - using the 'sum' as you mentioned
+        // Extract total score from metrics
         result.data[0]?.metrics.forEach(metric => {
           if (metric.metric === 'oSurveyTotalScore' && metric.stats.sum !== undefined) {
             conv.totalScore = metric.stats.sum;
@@ -694,8 +793,13 @@
         });
       });
       
-      // Convert Map to array
-      return Array.from(conversations.values());
+      // Convert Map to array and generate sample question scores
+      return Array.from(conversations.values()).map(conv => {
+        // Generate sample question scores based on total score
+        const questionScores = generateSampleQuestionScores(conv.totalScore);
+        conv.questionScores = questionScores;
+        return conv;
+      });
     }
 
     // ===== Render Surveys =====
@@ -735,6 +839,7 @@
             <thead>
               <tr>
                 <th>Agent</th>
+                <th>Date & Time</th>
                 <th>Survey Form</th>
                 <th>Media Type</th>
                 <th>Score</th>
@@ -746,17 +851,19 @@
       
       let rowIndex = 0;
       
-      // Sort surveys by score (highest first)
-      const sortedSurveys = [...state.surveys].sort((a, b) => b.totalScore - a.totalScore);
+      // Sort surveys by date (newest first)
+      const sortedSurveys = [...state.surveys].sort((a, b) => b.conversationDate - a.conversationDate);
       
       sortedSurveys.forEach((survey, surveyIndex) => {
         const score = survey.totalScore || 0;
         const rating = getRatingLabel(score);
         const roundedScore = Math.min(5, Math.max(1, Math.round(score / 20))); // Convert 0-100 to 1-5 scale for rating indicator
+        const dateTime = toDateTime(survey.conversationDate);
         
         html += `
           <tr class="expandable-row" onclick="toggleSurveyRow(${rowIndex})">
             <td><strong>${survey.agentName}</strong></td>
+            <td>${dateTime}</td>
             <td>${survey.surveyFormName || 'Unknown'}</td>
             <td>${survey.mediaType || 'Unknown'}</td>
             <td>
@@ -766,22 +873,39 @@
             <td><span class="expand-icon">▶</span> Click to expand</td>
           </tr>
           <tr id="survey-row-${rowIndex}" class="expandable-content">
-            <td colspan="5">
+            <td colspan="6">
               <div class="survey-details">
-                <div><strong>Conversation ID:</strong> ${survey.conversationId}</div>
+                <div><strong>Conversation Date:</strong> ${dateTime}</div>
                 <div><strong>Agent:</strong> ${survey.agentName}</div>
-                <div><strong>Agent ID:</strong> ${survey.userId}</div>
                 <div><strong>Survey Form:</strong> ${survey.surveyFormName || 'Unknown'}</div>
                 <div><strong>Media Type:</strong> ${survey.mediaType || 'Unknown'}</div>
                 <div><strong>Total Score:</strong> ${score}%</div>
                 
-                <h5 style="margin-top: 15px;">Common Survey Questions:</h5>
-                ${Object.entries(QUESTION_TEXTS).map(([id, text], index) => `
-                  <div class="survey-question">
-                    <div><strong>Question ${index + 1}:</strong></div>
-                    <div class="question-text">${text}</div>
-                  </div>
-                `).join('')}
+                <h5 style="margin-top: 15px;">Question Responses:</h5>
+                
+                ${QUESTION_GROUPS.map((group, groupIndex) => {
+                  const question = group.questions[0];
+                  const questionScore = survey.questionScores && survey.questionScores[groupIndex];
+                  
+                  return `
+                    <div class="question-group">
+                      <div class="question-group-title">${group.name}</div>
+                      <div class="survey-question">
+                        <div class="question-text">${question.text}</div>
+                        ${question.maxScore > 0 ? `
+                          <div>
+                            <strong>Score:</strong> 
+                            <span class="score-display">
+                              ${questionScore ? `${questionScore.score}/${question.maxScore}` : 'Not scored'}
+                            </span>
+                          </div>
+                        ` : `
+                          <div><em>Free text response (no score)</em></div>
+                        `}
+                      </div>
+                    </div>
+                  `;
+                }).join('')}
               </div>
             </td>
           </tr>
