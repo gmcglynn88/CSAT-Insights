@@ -78,6 +78,8 @@
     .stat-card .label { font-size: 14px; color: var(--text-light); margin-top: 8px; }
     
     .no-data { text-align: center; padding: 40px; color: var(--text-light); }
+    
+    .debug-info { background: #f1f3f5; border: 1px solid #dee2e6; border-radius: 6px; padding: 10px; margin-top: 10px; font-family: monospace; font-size: 12px; white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
   </style>
 </head>
 <body>
@@ -115,11 +117,15 @@
           </button>
         </div>
       </div>
+      <div>
+        <label><input type="checkbox" id="debugMode" /> Show Debug Info</label>
+      </div>
     </div>
 
     <div class="card">
       <h2 class="section-title">Survey Responses</h2>
       <div id="surveysContainer" class="no-data">Select date range and click "Load Surveys" to begin</div>
+      <div id="debugContainer" style="display:none;"></div>
     </div>
   </div>
 
@@ -138,7 +144,8 @@
       teams: [],
       teamMembers: new Map(),
       surveys: [],
-      totalConversations: 0
+      totalConversations: 0,
+      debugInfo: []
     };
 
     const dropdowns = { 
@@ -194,6 +201,38 @@
       if(score >= 5) return {label: 'Fair', class: 'fair', badge: 'badge-fair'};
       if(score >= 3) return {label: 'Poor', class: 'poor', badge: 'badge-poor'};
       return {label: 'Very Poor', class: 'very-poor', badge: 'badge-very-poor'};
+    }
+
+    function addDebugInfo(message, data = null) {
+      const debugMode = document.getElementById('debugMode').checked;
+      if (!debugMode) return;
+      
+      const timestamp = new Date().toLocaleTimeString();
+      const debugEntry = {
+        timestamp,
+        message,
+        data: data ? JSON.stringify(data, null, 2) : null
+      };
+      
+      state.debugInfo.push(debugEntry);
+      
+      // Update debug display
+      const debugContainer = document.getElementById('debugContainer');
+      if (debugContainer.style.display === 'none') {
+        debugContainer.style.display = 'block';
+      }
+      
+      let debugHtml = '<h3>Debug Information</h3>';
+      state.debugInfo.forEach(entry => {
+        debugHtml += `<div class="debug-info"><strong>${entry.timestamp}:</strong> ${entry.message}`;
+        if (entry.data) {
+          debugHtml += `<br><pre>${entry.data}</pre>`;
+        }
+        debugHtml += '</div>';
+      });
+      
+      debugContainer.innerHTML = debugHtml;
+      debugContainer.scrollTop = debugContainer.scrollHeight;
     }
 
     // ===== OAuth Flow =====
@@ -271,6 +310,12 @@
 
       // Set button handler
       document.getElementById('loadBtn').onclick = loadSurveys;
+      
+      // Set debug mode handler
+      document.getElementById('debugMode').onchange = function() {
+        const debugContainer = document.getElementById('debugContainer');
+        debugContainer.style.display = this.checked ? 'block' : 'none';
+      };
 
       // Set default dates (last 7 days)
       const today = new Date();
@@ -586,9 +631,15 @@
         return;
       }
       
+      // Clear previous debug info
+      state.debugInfo = [];
+      
       const agentIds = await computeSelectedAgentIds();
       const start = new Date(fromDate + 'T00:00:00');
       const end = new Date(toDate + 'T23:59:59');
+      
+      addDebugInfo(`Date range: ${fromDate} to ${toDate}`);
+      addDebugInfo(`Selected agents: ${agentIds.length}`);
       
       const btn = document.getElementById('loadBtn'); 
       setLoading(btn, true); 
@@ -598,10 +649,12 @@
         // First, get conversations using the aggregates API
         const conversations = await fetchConversations(start, end, agentIds);
         console.log(`Found ${conversations.length} conversations`);
+        addDebugInfo(`Found ${conversations.length} conversations`, conversations);
         
         // Get surveys for these conversations using the QUALITY API endpoint
         const surveys = await fetchSurveysForConversations(conversations);
         console.log(`Found ${surveys.length} surveys`);
+        addDebugInfo(`Found ${surveys.length} surveys`, surveys);
         
         state.surveys = surveys;
         state.totalConversations = conversations.length;
@@ -611,6 +664,7 @@
       } catch(e) { 
         console.error('Error loading surveys:', e); 
         msg('Failed to load surveys: ' + e.message, 'error'); 
+        addDebugInfo(`Error: ${e.message}`);
       } finally { 
         setLoading(btn, false); 
       }
@@ -625,10 +679,11 @@
         "interval": `${start.toISOString()}/${end.toISOString()}`,
         "granularity": "P1D",
         "groupBy": [
-          "userId",
-          "conversationId"
+          "conversationId",
+          "userId"
         ],
         "metrics": [
+          "nOffered",
           "tHandle"
         ],
         "flattenMultivaluedDimensions": false
@@ -648,13 +703,13 @@
       }
       
       try {
-        console.log('Fetching conversations with body:', JSON.stringify(body, null, 2));
+        addDebugInfo('Fetching conversations with body:', body);
         const data = await fetchJsonWithRetry(url, {
           method: 'POST',
           body: JSON.stringify(body)
         });
         
-        console.log('Conversations API response:', data);
+        addDebugInfo('Conversations API response:', data);
         
         const conversations = [];
         if(data && data.results && data.results.length > 0){
@@ -663,7 +718,7 @@
               conversations.push({
                 conversationId: result.group.conversationId,
                 agentId: result.group.userId,
-                // We'll enrich this with more details later
+                tHandle: safeGet(result, 'data[0].stats.tHandle.average', 0)
               });
             }
           });
@@ -674,27 +729,36 @@
           );
           
           console.log(`Found ${uniqueConversations.length} unique conversations`);
+          addDebugInfo(`Found ${uniqueConversations.length} unique conversations`);
           return uniqueConversations;
         }
         
         return [];
       } catch (error) {
         console.error('Error fetching conversations:', error);
+        addDebugInfo('Error fetching conversations:', error.message);
         throw error;
       }
     }
 
     // Use the QUALITY API endpoint for surveys instead of analytics aggregates
     async function fetchSurveysForConversations(conversations){
-      if(!conversations || conversations.length === 0) return [];
+      if(!conversations || conversations.length === 0) {
+        addDebugInfo('No conversations provided to fetch surveys');
+        return [];
+      }
       
       const allSurveys = [];
       
       // Process conversations in batches to avoid rate limiting
-      const batchSize = 20;
+      const batchSize = 10;
       for(let i = 0; i < conversations.length; i += batchSize){
         const batch = conversations.slice(i, i + batchSize);
-        console.log(`Processing survey batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(conversations.length/batchSize)}`);
+        const batchNumber = Math.floor(i/batchSize) + 1;
+        const totalBatches = Math.ceil(conversations.length/batchSize);
+        
+        addDebugInfo(`Processing survey batch ${batchNumber}/${totalBatches}`);
+        console.log(`Processing survey batch ${batchNumber}/${totalBatches}`);
         
         // Process each conversation in the batch in parallel
         const batchPromises = batch.map(async (conversation) => {
@@ -702,33 +766,49 @@
             // Use the QUALITY API endpoint: /api/v2/quality/conversations/{conversationId}/surveys
             const url = `https://api.${config.REGION}/api/v2/quality/conversations/${conversation.conversationId}/surveys`;
             
+            addDebugInfo(`Fetching surveys for conversation: ${conversation.conversationId}`);
             const surveysData = await fetchJsonWithRetry(url, {method: 'GET'});
             
             if(surveysData && surveysData.entities && surveysData.entities.length > 0){
-              // Get conversation details for more info
-              const conversationDetails = await fetchConversationDetails(conversation.conversationId);
-              const agent = state.users.find(u => u.id === conversation.agentId);
+              // Filter for completed surveys only (status: "Finished")
+              const completedSurveys = surveysData.entities.filter(s => s.status === "Finished");
               
-              // Process each survey for this conversation
-              return surveysData.entities.map(survey => ({
-                conversationId: conversation.conversationId,
-                surveyId: survey.id,
-                score: survey.totalScore || 0,
-                conversationStart: conversationDetails?.conversationStart || null,
-                conversationEnd: conversationDetails?.conversationEnd || null,
-                mediaType: conversationDetails?.mediaType || 'Unknown',
-                agentId: conversation.agentId,
-                agentName: agent ? agent.name : 'Unknown Agent',
-                customerInfo: conversationDetails?.customerInfo || null,
-                surveyType: survey.surveyForm?.name || 'Unknown Survey',
-                questions: parseSurveyQuestions(survey),
-                submittedDate: survey.submittedDate
-              }));
+              if(completedSurveys.length > 0) {
+                addDebugInfo(`Found ${completedSurveys.length} completed surveys for conversation ${conversation.conversationId}`);
+                
+                // Get conversation details for more info
+                const conversationDetails = await fetchConversationDetails(conversation.conversationId);
+                const agent = state.users.find(u => u.id === conversation.agentId);
+                
+                // Process each completed survey for this conversation
+                return completedSurveys.map(survey => ({
+                  conversationId: conversation.conversationId,
+                  surveyId: survey.id,
+                  score: survey.totalScore || 0,
+                  npsScore: survey.npsScore || 0,
+                  conversationStart: conversationDetails?.conversationStart || null,
+                  conversationEnd: conversationDetails?.conversationEnd || null,
+                  mediaType: conversationDetails?.mediaType || 'Unknown',
+                  agentId: conversation.agentId,
+                  agentName: agent ? agent.name : 'Unknown Agent',
+                  customerInfo: conversationDetails?.customerInfo || null,
+                  surveyType: survey.surveyForm?.name || 'Unknown Survey',
+                  questions: parseSurveyQuestions(survey),
+                  submittedDate: survey.completedDate || survey.submittedDate,
+                  status: survey.status,
+                  answers: survey.answers
+                }));
+              } else {
+                addDebugInfo(`No completed surveys for conversation ${conversation.conversationId} (found ${surveysData.entities.length} total surveys)`);
+              }
+            } else {
+              addDebugInfo(`No surveys found for conversation ${conversation.conversationId}`);
             }
             
             return [];
           } catch (error) {
             console.error(`Error fetching surveys for conversation ${conversation.conversationId}:`, error);
+            addDebugInfo(`Error fetching surveys for conversation ${conversation.conversationId}: ${error.message}`);
             return [];
           }
         });
@@ -749,27 +829,28 @@
         }
       }
       
-      console.log(`Total surveys found: ${allSurveys.length}`);
+      console.log(`Total completed surveys found: ${allSurveys.length}`);
+      addDebugInfo(`Total completed surveys found: ${allSurveys.length}`);
       return allSurveys;
     }
 
     // Helper function to parse survey questions from survey response
     function parseSurveyQuestions(survey){
-      if(!survey) return [];
+      if(!survey || !survey.answers || !survey.answers.questionGroupScores) return [];
       
       const questions = [];
       
       // Check for question groups
-      if(survey.questionGroups && Array.isArray(survey.questionGroups)){
-        survey.questionGroups.forEach(group => {
-          if(group.questions && Array.isArray(group.questions)){
-            group.questions.forEach(q => {
+      if(survey.answers.questionGroupScores && Array.isArray(survey.answers.questionGroupScores)){
+        survey.answers.questionGroupScores.forEach(group => {
+          if(group.questionScores && Array.isArray(group.questionScores)){
+            group.questionScores.forEach(q => {
               if(q.questionId){
                 questions.push({
                   questionId: q.questionId,
-                  questionText: q.text || `Question ${q.questionId}`,
-                  score: q.answerScore || 0,
-                  answerText: q.answerText || '',
+                  score: q.score || q.npsScore || 0,
+                  npsScore: q.npsScore || null,
+                  answerId: q.answerId || null,
                   markedNA: q.markedNA || false
                 });
               }
@@ -856,6 +937,7 @@
             <div class="label">Surveys Found</div>
           </div>
           <div class="muted">No surveys found for the selected criteria.</div>
+          <div class="muted">Check the debug information below for details.</div>
         `;
         return;
       }
@@ -894,6 +976,7 @@
                 <th>Date</th>
                 <th>Survey Type</th>
                 <th>Score</th>
+                <th>NPS</th>
                 <th>Contact Info</th>
                 <th>Details</th>
               </tr>
@@ -916,6 +999,7 @@
         const date = survey.submittedDate ? toDateTime(survey.submittedDate) : 
                     (survey.conversationStart ? toDateTime(survey.conversationStart) : 'Unknown date');
         const score = survey.score || 0;
+        const npsScore = survey.npsScore || 0;
         const rating = getRatingLabel(score);
         const roundedScore = Math.round(score);
         
@@ -935,22 +1019,26 @@
               <span class="rating-indicator rating-${roundedScore}"></span>
               <span class="badge ${rating.badge}">${score.toFixed(1)} - ${rating.label}</span>
             </td>
+            <td>${npsScore}</td>
             <td>${contactInfo}</td>
             <td><span class="expand-icon">▶</span> Click to expand</td>
           </tr>
           <tr id="survey-row-${rowIndex}" class="expandable-content">
-            <td colspan="6">
+            <td colspan="7">
               <div class="survey-details">
                 <div><strong>Conversation ID:</strong> ${survey.conversationId}</div>
                 <div><strong>Survey ID:</strong> ${survey.surveyId}</div>
                 <div><strong>Survey Type:</strong> ${survey.surveyType || 'Unknown'}</div>
+                <div><strong>Status:</strong> ${survey.status || 'Unknown'}</div>
+                <div><strong>Score:</strong> ${score.toFixed(1)}</div>
+                <div><strong>NPS Score:</strong> ${npsScore}</div>
                 ${survey.questions && survey.questions.length > 0 ? `
                   <h5>Question Responses:</h5>
                   ${survey.questions.map((q, qIndex) => `
                     <div class="survey-question">
-                      <div><strong>Question ${qIndex + 1}:</strong> ${q.questionText || q.questionId || 'Unknown question'}</div>
+                      <div><strong>Question ${qIndex + 1}:</strong> ${q.questionId || 'Unknown question'}</div>
                       <div><strong>Score:</strong> ${q.score.toFixed(1)}</div>
-                      ${q.answerText ? `<div><strong>Answer:</strong> ${q.answerText}</div>` : ''}
+                      ${q.npsScore ? `<div><strong>NPS Score:</strong> ${q.npsScore}</div>` : ''}
                     </div>
                   `).join('')}
                 ` : '<div class="muted">No question details available</div>'}
