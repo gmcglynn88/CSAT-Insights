@@ -83,6 +83,10 @@
     
     .api-test-button { background: #4f46e5; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-top: 10px; }
     .api-test-button:hover { background: #4338ca; }
+    
+    .log-entry { margin: 5px 0; padding: 5px; border-left: 3px solid #63AB8F; background: #f8f9fa; }
+    .log-error { border-left-color: #ef4444; background: #fee2e2; }
+    .log-success { border-left-color: #22c55e; background: #dcfce7; }
   </style>
 </head>
 <body>
@@ -96,14 +100,6 @@
     <div class="card">
       <h2 class="section-title">CSAT Survey Viewer</h2>
       <div class="controls">
-        <div>
-          <label for="userDropdown">Agents</label>
-          <div id="userDropdown" class="checkbox-dropdown"></div>
-        </div>
-        <div>
-          <label for="teamDropdown">Work Teams</label>
-          <div id="teamDropdown" class="checkbox-dropdown"></div>
-        </div>
         <div>
           <label for="fromDate">From Date</label>
           <input id="fromDate" type="date">
@@ -120,12 +116,9 @@
           </button>
         </div>
       </div>
-      <div>
-        <label><input type="checkbox" id="debugMode" checked /> Show Debug Info</label>
-      </div>
       <div style="margin-top: 15px; padding: 10px; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px;">
-        <h4 style="margin-top: 0; color: #0369a1;">API Test</h4>
-        <p style="margin: 5px 0; font-size: 14px;">Test the specific conversation that has surveys:</p>
+        <h4 style="margin-top: 0; color: #0369a1;">Test Specific Conversation</h4>
+        <p style="margin: 5px 0; font-size: 14px;">Test a known conversation that has surveys:</p>
         <div style="display: flex; gap: 10px; align-items: center;">
           <input type="text" id="testConversationId" placeholder="Enter Conversation ID" style="flex: 1; padding: 8px;" value="66b7b3b8-a065-4ecf-85f5-2b24bf2493a1">
           <button id="testApiBtn" class="api-test-button">Test API Call</button>
@@ -135,8 +128,11 @@
 
     <div class="card">
       <h2 class="section-title">Survey Responses</h2>
-      <div id="surveysContainer" class="no-data">Select date range and click "Load Surveys" to begin</div>
-      <div id="debugContainer" style="display:block;"></div>
+      <div id="surveysContainer" class="no-data">Click "Load Surveys" or test a specific conversation</div>
+      <div id="debugContainer" style="display:block; margin-top: 20px;">
+        <h3>API Log</h3>
+        <div id="apiLog"></div>
+      </div>
     </div>
   </div>
 
@@ -149,17 +145,8 @@
 
     const state = {
       accessToken: null,
-      users: [],
-      teams: [],
-      teamMembers: new Map(),
       surveys: [],
-      totalConversations: 0,
-      debugInfo: []
-    };
-
-    const dropdowns = { 
-      users: null, 
-      teams: null 
+      apiLog: []
     };
 
     // ===== Helper Functions =====
@@ -212,36 +199,32 @@
       return {label: 'Very Poor', class: 'very-poor', badge: 'badge-very-poor'};
     }
 
-    function addDebugInfo(message, data = null) {
-      const debugMode = document.getElementById('debugMode').checked;
-      if (!debugMode) return;
-      
+    function addLog(message, type = 'info') {
       const timestamp = new Date().toLocaleTimeString();
-      const debugEntry = {
+      const logEntry = {
         timestamp,
         message,
-        data: data ? (typeof data === 'string' ? data : JSON.stringify(data, null, 2)) : null
+        type
       };
       
-      state.debugInfo.push(debugEntry);
+      state.apiLog.unshift(logEntry); // Add to beginning for reverse chronological order
       
-      // Update debug display
-      const debugContainer = document.getElementById('debugContainer');
-      if (debugContainer.style.display === 'none') {
-        debugContainer.style.display = 'block';
+      // Keep only last 50 entries
+      if (state.apiLog.length > 50) {
+        state.apiLog = state.apiLog.slice(0, 50);
       }
       
-      let debugHtml = '<h3>Debug Information</h3>';
-      state.debugInfo.forEach(entry => {
-        debugHtml += `<div class="debug-info"><strong>${entry.timestamp}:</strong> ${entry.message}`;
-        if (entry.data) {
-          debugHtml += `<br><pre>${entry.data}</pre>`;
-        }
-        debugHtml += '</div>';
+      // Update log display
+      const logContainer = document.getElementById('apiLog');
+      let logHtml = '';
+      
+      state.apiLog.forEach(entry => {
+        logHtml += `<div class="log-entry ${entry.type === 'error' ? 'log-error' : entry.type === 'success' ? 'log-success' : ''}">
+          <strong>${entry.timestamp}:</strong> ${entry.message}
+        </div>`;
       });
       
-      debugContainer.innerHTML = debugHtml;
-      debugContainer.scrollTop = debugContainer.scrollHeight;
+      logContainer.innerHTML = logHtml;
     }
 
     // ===== OAuth Flow =====
@@ -306,28 +289,9 @@
         document.getElementById('appContent').style.display = 'block';
       }, 800);
 
-      // Initialize dropdowns
-      dropdowns.users = createCheckboxDropdown('userDropdown', {
-        placeholder: 'Select agents (optional)', 
-        searchPlaceholder: 'Search agents...'
-      });
-      
-      dropdowns.teams = createCheckboxDropdown('teamDropdown', {
-        placeholder: 'Select work teams (optional)', 
-        searchPlaceholder: 'Search teams...'
-      });
-
-      // Set button handler
+      // Set button handlers
       document.getElementById('loadBtn').onclick = loadSurveys;
-      
-      // Set test API button handler
       document.getElementById('testApiBtn').onclick = testSpecificConversation;
-      
-      // Set debug mode handler
-      document.getElementById('debugMode').onchange = function() {
-        const debugContainer = document.getElementById('debugContainer');
-        debugContainer.style.display = this.checked ? 'block' : 'none';
-      };
 
       // Set default dates (last 7 days)
       const today = new Date();
@@ -337,302 +301,44 @@
       document.getElementById('fromDate').value = sevenDaysAgo.toISOString().split('T')[0];
       document.getElementById('toDate').value = today.toISOString().split('T')[0];
 
-      // Load users and teams
-      Promise.all([fetchAllUsers(), fetchAllTeams()])
-        .then(() => {
-          console.log('Initial data loaded');
-        })
-        .catch(err => {
-          console.error('Initial load failed:', err);
-          msg('Initial load failed: ' + err.message, 'error');
-        });
-    }
-
-    // ===== Checkbox Dropdown Component =====
-    function createCheckboxDropdown(containerId, {placeholder, searchPlaceholder}){
-      const root = document.getElementById(containerId); 
-      root.innerHTML = '';
-      
-      const trigger = document.createElement('div'); 
-      trigger.className = 'cd-trigger';
-      trigger.innerHTML = `<span class="label">${placeholder}</span><span class="count">0 selected</span>`;
-      root.appendChild(trigger);
-      
-      const panel = document.createElement('div'); 
-      panel.className = 'cd-panel';
-      panel.innerHTML = `
-        <div class="cd-header">
-          <input type="text" class="cd-search" placeholder="${searchPlaceholder}" />
-          <div class="cd-actions"><button type="button" data-cd="clear">Clear</button></div>
-        </div>
-        <div class="cd-selectall"><label><input type="checkbox" data-cd="selectall"/> Select all</label></div>
-        <div class="cd-list"></div>
-        <div class="cd-footer"><span data-cd="summary">0 selected</span><span>Click outside to close</span></div>`;
-      
-      root.appendChild(panel);
-
-      const list = panel.querySelector('.cd-list');
-      const search = panel.querySelector('.cd-search');
-      const clearBtn = panel.querySelector('[data-cd="clear"]');
-      const selectAll = panel.querySelector('[data-cd="selectall"]');
-      const summary = panel.querySelector('[data-cd="summary"]');
-
-      let options = []; 
-      let selected = new Set();
-
-      function render(filter=''){
-        const ft = filter.trim().toLowerCase(); 
-        list.innerHTML = '';
-        
-        const filtered = !ft ? options : options.filter(o => (o.label || '').toLowerCase().includes(ft));
-        
-        if(!filtered.length){ 
-          list.innerHTML = `<div class="cd-item" style="color:#6C757D">No matches</div>`; 
-          return; 
-        }
-        
-        filtered.forEach(o => {
-          const id = `${containerId}__${o.value}`;
-          const row = document.createElement('div'); 
-          row.className = 'cd-item';
-          row.innerHTML = `
-            <label for="${id}">
-              <input type="checkbox" id="${id}" value="${o.value}" ${selected.has(o.value) ? 'checked' : ''}/>
-              <span>${o.label || o.value}</span>
-            </label>`;
-          
-          row.querySelector('input').addEventListener('change', (e) => {
-            if(e.target.checked) selected.add(o.value);
-            else selected.delete(o.value);
-            updateSummary();
-            updateSelectAllState();
-          });
-          
-          list.appendChild(row);
-        });
-      }
-      
-      function updateSummary(){ 
-        trigger.querySelector('.count').textContent = `${selected.size} selected`; 
-        summary.textContent = `${selected.size} selected`; 
-      }
-      
-      function updateSelectAllState(){ 
-        const total = options.length, count = selected.size; 
-        selectAll.indeterminate = count > 0 && count < total; 
-        selectAll.checked = total > 0 && count === total; 
-      }
-
-      // Event listeners
-      trigger.addEventListener('click', () => { 
-        panel.classList.toggle('open'); 
-        search.focus(); 
-      });
-      
-      document.addEventListener('click', (e) => { 
-        if(!root.contains(e.target)) panel.classList.remove('open'); 
-      });
-      
-      search.addEventListener('input', () => render(search.value));
-      
-      clearBtn.addEventListener('click', () => { 
-        selected.clear(); 
-        render(search.value); 
-        updateSummary(); 
-        updateSelectAllState(); 
-      });
-      
-      selectAll.addEventListener('change', () => { 
-        if(selectAll.checked) options.forEach(o => selected.add(o.value));
-        else selected.clear();
-        render(search.value); 
-        updateSummary(); 
-      });
-
-      function setOptions(newOptions){ 
-        options = newOptions || []; 
-        selected.forEach(v => { 
-          if(!options.some(o => o.value === v)) selected.delete(v); 
-        }); 
-        render(search.value); 
-        updateSummary(); 
-        updateSelectAllState(); 
-      }
-      
-      function getSelectedValues(){ 
-        return Array.from(selected); 
-      }
-
-      render('');
-      
-      return { setOptions, getSelectedValues };
+      addLog('App initialized successfully', 'success');
     }
 
     // ===== API Functions =====
-    async function fetchJsonWithRetry(url, options = {}, {retries = 3, baseDelay = 500} = {}){
-      let attempt = 0;
+    async function makeApiCall(url, options = {}) {
+      const startTime = Date.now();
+      addLog(`Making API call to: ${url}`);
       
-      while(true){
-        try {
-          const response = await fetch(url, {
-            ...options,
-            headers: {
-              'Authorization': 'Bearer ' + state.accessToken,
-              'Content-Type': 'application/json',
-              ...(options.headers || {})
-            }
-          });
-          
-          if(response.ok){
-            if(response.status === 204) return null;
-            const data = await response.json();
-            return data;
-          }
-          
-          // Log error details for debugging
-          if(response.status === 400 || response.status === 404) {
-            try {
-              const errorBody = await response.text();
-              const errorMessage = `API Error (${response.status}): ${errorBody}`;
-              console.error(errorMessage);
-              addDebugInfo(errorMessage);
-              console.error('Request URL:', url);
-              if(options.body) {
-                console.error('Request Body:', options.body);
-              }
-            } catch(e) {
-              console.error('Could not read error response');
-            }
-          }
-          
-          if([400,401,403,404].includes(response.status)){
-            if(response.status === 401 || response.status === 403) {
-              // Token expired
-              sessionStorage.removeItem('purecloud_csat_token');
-              sessionStorage.removeItem('purecloud_csat_token_exp');
-              document.getElementById('appContent').style.display = 'none';
-              document.getElementById('authCard').style.display = 'block';
-              document.getElementById('auth-message').textContent = 'Session expired. Redirecting to login...';
-              document.getElementById('auth-message').className = 'info-message';
-              setTimeout(() => { window.location.href = oauthUrl; }, 2000);
-              throw new Error('Authentication required');
-            }
-            throw new Error(`HTTP ${response.status}`);
-          }
-          
-          attempt++;
-          if(attempt > retries){
-            throw new Error(`HTTP ${response.status} after ${retries} retries`);
-          }
-          
-          const delay = Math.round(baseDelay * (2 ** (attempt - 1)) * (1 + Math.random() * 0.25));
-          await sleep(delay);
-        } catch (error) {
-          console.error('Fetch error:', error);
-          throw error;
-        }
-      }
-    }
-
-    async function fetchPaginatedGET(url){
-      let all = []; 
-      let next = url;
-      
-      while(next){
-        const data = await fetchJsonWithRetry(next, {method: 'GET'});
-        
-        if(Array.isArray(data.entities)) all = all.concat(data.entities);
-        else if(Array.isArray(data.users)) all = all.concat(data.users);
-        else if(Array.isArray(data)) all = all.concat(data);
-        else if(data.entities) all = all.concat(data.entities);
-        
-        next = data.nextUri ? `https://api.${config.REGION}${data.nextUri}` : null;
-      }
-      
-      return all;
-    }
-
-    async function fetchAllUsers(){
       try {
-        console.log('Fetching users...');
-        const url = `https://api.${config.REGION}/api/v2/users?pageSize=100`;
-        const users = await fetchPaginatedGET(url);
-        
-        state.users = users.map(u => ({
-          id: u.id,
-          name: (u.name || `${u.givenName || ''} ${u.familyName || ''}`).trim(),
-          email: u.email || ''
-        })).sort((a, b) => a.name.localeCompare(b.name));
-        
-        dropdowns.users.setOptions(state.users.map(u => ({
-          value: u.id,
-          label: `${u.name}${u.email ? ` — ${u.email}` : ''}`
-        })));
-        
-        console.log(`Loaded ${state.users.length} users`);
-      } catch (err) {
-        console.error('Failed to fetch users:', err);
-        throw new Error('Failed to load users: ' + err.message);
-      }
-    }
-
-    async function fetchAllTeams(){
-      try {
-        console.log('Fetching teams...');
-        const url = `https://api.${config.REGION}/api/v2/teams?pageSize=100`;
-        const teams = await fetchPaginatedGET(url);
-        
-        state.teams = teams.map(t => ({
-          id: t.id,
-          name: t.name || '(Unnamed team)'
-        })).sort((a, b) => a.name.localeCompare(b.name));
-        
-        dropdowns.teams.setOptions(state.teams.map(t => ({
-          value: t.id,
-          label: t.name
-        })));
-        
-        console.log(`Loaded ${state.teams.length} teams`);
-      } catch (err) {
-        console.error('Failed to fetch teams:', err);
-        throw new Error('Failed to load teams: ' + err.message);
-      }
-    }
-
-    async function ensureTeamMembersLoaded(teamIds){
-      const missing = teamIds.filter(id => !state.teamMembers.has(id));
-      if(!missing.length) return;
-      
-      await Promise.all(missing.map(fetchTeamMembers));
-    }
-
-    async function fetchTeamMembers(teamId){
-      const url = `https://api.${config.REGION}/api/v2/teams/${teamId}/members?pageSize=100`;
-      const members = await fetchPaginatedGET(url);
-      
-      const ids = Array.from(new Set(members.map(m => 
-        safeGet(m, 'member.id') || 
-        safeGet(m, 'member.user.id') || 
-        safeGet(m, 'user.id') || 
-        safeGet(m, 'id')
-      ).filter(Boolean)));
-      
-      state.teamMembers.set(teamId, ids);
-    }
-
-    async function computeSelectedAgentIds(){
-      const userIds = dropdowns.users.getSelectedValues();
-      const teamIds = dropdowns.teams.getSelectedValues();
-      const set = new Set(userIds);
-      
-      if(teamIds.length){
-        await ensureTeamMembersLoaded(teamIds);
-        teamIds.forEach(tid => {
-          (state.teamMembers.get(tid) || []).forEach(uid => set.add(uid));
+        const response = await fetch(url, {
+          ...options,
+          headers: {
+            'Authorization': 'Bearer ' + state.accessToken,
+            'Content-Type': 'application/json',
+            ...(options.headers || {})
+          }
         });
+        
+        const endTime = Date.now();
+        const duration = endTime - startTime;
+        
+        addLog(`Response: ${response.status} ${response.statusText} (${duration}ms)`);
+        
+        if (response.ok) {
+          if (response.status === 204) {
+            return null;
+          }
+          const data = await response.json();
+          return data;
+        } else {
+          const errorText = await response.text();
+          addLog(`Error ${response.status}: ${errorText}`, 'error');
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+      } catch (error) {
+        addLog(`Fetch error: ${error.message}`, 'error');
+        throw error;
       }
-      
-      return Array.from(set);
     }
 
     // ===== Test Specific Conversation =====
@@ -649,72 +355,104 @@
       btn.disabled = true;
       
       try {
-        addDebugInfo(`=== Testing API for conversation: ${conversationId} ===`);
+        addLog(`=== Testing survey API for conversation: ${conversationId} ===`);
         
-        // Test 1: Direct API call
+        // Build the exact URL as shown in your example
         const url = `https://api.${config.REGION}/api/v2/quality/conversations/${conversationId}/surveys`;
-        addDebugInfo(`Making direct API call to: ${url}`);
         
-        const response = await fetch(url, {
-          method: 'GET',
-          headers: {
-            'Authorization': 'Bearer ' + state.accessToken,
-            'Content-Type': 'application/json'
-          }
-        });
+        addLog(`GET ${url}`);
         
-        addDebugInfo(`Response status: ${response.status} ${response.statusText}`);
+        const data = await makeApiCall(url, { method: 'GET' });
         
-        if (response.ok) {
-          const data = await response.json();
-          addDebugInfo('API Response:', data);
+        if (data) {
+          addLog(`API Response received`, 'success');
           
-          if (data && data.entities && data.entities.length > 0) {
-            addDebugInfo(`Found ${data.entities.length} surveys`);
-            
-            // Show the raw data
-            const container = document.getElementById('surveysContainer');
-            container.innerHTML = `
-              <div class="stat-card">
-                <div class="value">${data.entities.length}</div>
-                <div class="label">Surveys Found in Test</div>
-              </div>
-              <h3>Raw API Response:</h3>
-              <div class="debug-info">
-                <pre>${JSON.stringify(data, null, 2)}</pre>
-              </div>
-              <h3>Parsed Surveys:</h3>
-            `;
+          // Show the raw data
+          const container = document.getElementById('surveysContainer');
+          
+          if (data.entities && data.entities.length > 0) {
+            addLog(`Found ${data.entities.length} survey(s)`, 'success');
             
             // Parse and display each survey
+            let html = `
+              <div class="stat-card">
+                <div class="value">${data.entities.length}</div>
+                <div class="label">Surveys Found</div>
+              </div>
+              <h3>Surveys for Conversation: ${conversationId}</h3>
+            `;
+            
             data.entities.forEach((survey, index) => {
-              container.innerHTML += `
-                <div class="survey-details" style="margin-bottom: 20px;">
-                  <h4>Survey ${index + 1}</h4>
-                  <div><strong>ID:</strong> ${survey.id}</div>
+              const score = survey.totalScore || 0;
+              const npsScore = survey.npsScore || 0;
+              const rating = getRatingLabel(score / 10); // Convert from 0-100 to 0-10 scale
+              const roundedScore = Math.round(score / 10);
+              
+              html += `
+                <div class="survey-details" style="margin-bottom: 20px; padding: 15px; border: 1px solid var(--border-color); border-radius: 8px;">
+                  <h4>Survey ${index + 1} - ${survey.status || 'Unknown Status'}</h4>
+                  <div><strong>Survey ID:</strong> ${survey.id}</div>
                   <div><strong>Status:</strong> ${survey.status}</div>
-                  <div><strong>Total Score:</strong> ${survey.totalScore || 'N/A'}</div>
-                  <div><strong>NPS Score:</strong> ${survey.npsScore || 'N/A'}</div>
+                  <div><strong>Total Score:</strong> ${score}%</div>
+                  <div><strong>NPS Score:</strong> ${npsScore}</div>
                   <div><strong>Completed Date:</strong> ${survey.completedDate || 'N/A'}</div>
+                  <div><strong>Survey Type:</strong> ${survey.surveyType || 'Unknown'}</div>
                   ${survey.surveyForm && survey.surveyForm.name ? `<div><strong>Survey Form:</strong> ${survey.surveyForm.name}</div>` : ''}
+                  
+                  <div style="margin-top: 10px;">
+                    <span class="rating-indicator rating-${roundedScore}"></span>
+                    <span class="badge ${rating.badge}">${(score/10).toFixed(1)} - ${rating.label}</span>
+                  </div>
+                  
+                  ${survey.answers && survey.answers.questionGroupScores ? `
+                    <h5 style="margin-top: 15px;">Question Responses:</h5>
+                    ${survey.answers.questionGroupScores.map((group, gIndex) => `
+                      <div class="survey-question">
+                        <div><strong>Question Group ${gIndex + 1}:</strong></div>
+                        ${group.questionScores ? group.questionScores.map((q, qIndex) => `
+                          <div style="margin-left: 15px; margin-top: 5px;">
+                            <div><strong>Question ${qIndex + 1}:</strong> ${q.questionId || 'Unknown'}</div>
+                            <div><strong>Score:</strong> ${q.score || q.npsScore || 0}</div>
+                          </div>
+                        `).join('') : '<div>No question scores</div>'}
+                      </div>
+                    `).join('')}
+                  ` : '<div class="muted">No question details available</div>'}
                 </div>
               `;
             });
             
+            container.innerHTML = html;
             msg(`Found ${data.entities.length} surveys for conversation ${conversationId}`, 'success');
           } else {
-            addDebugInfo('No surveys found in response');
+            addLog('No surveys found in response', 'info');
+            container.innerHTML = `
+              <div class="stat-card">
+                <div class="value">0</div>
+                <div class="label">Surveys Found</div>
+              </div>
+              <div class="muted">No surveys found for conversation ${conversationId}</div>
+              <div class="debug-info">
+                <pre>${JSON.stringify(data, null, 2)}</pre>
+              </div>
+            `;
             msg(`No surveys found for conversation ${conversationId}`, 'info');
           }
         } else {
-          const errorText = await response.text();
-          addDebugInfo(`Error response: ${errorText}`);
-          msg(`API Error: ${response.status} - ${response.statusText}`, 'error');
+          addLog('Empty response received', 'info');
+          const container = document.getElementById('surveysContainer');
+          container.innerHTML = `
+            <div class="stat-card">
+              <div class="value">0</div>
+              <div class="label">Surveys Found</div>
+            </div>
+            <div class="muted">Empty response for conversation ${conversationId}</div>
+          `;
+          msg(`Empty response for conversation ${conversationId}`, 'info');
         }
         
       } catch (error) {
         console.error('Test API error:', error);
-        addDebugInfo(`Test API error: ${error.message}`);
         msg(`Test failed: ${error.message}`, 'error');
       } finally {
         btn.textContent = originalText;
@@ -732,316 +470,143 @@
         return;
       }
       
-      // Clear previous debug info
-      state.debugInfo = [];
+      // Clear previous surveys
+      state.surveys = [];
       
-      const agentIds = await computeSelectedAgentIds();
       const start = new Date(fromDate + 'T00:00:00');
       const end = new Date(toDate + 'T23:59:59');
       
-      addDebugInfo(`Date range: ${fromDate} to ${toDate}`);
-      addDebugInfo(`Selected agents: ${agentIds.length}`);
+      addLog(`Loading surveys from ${fromDate} to ${toDate}`);
       
       const btn = document.getElementById('loadBtn'); 
       setLoading(btn, true); 
       msg('Loading conversations and surveys...', 'info');
       
       try {
-        // First, get conversations using the aggregates API
-        const conversations = await fetchConversations(start, end, agentIds);
-        console.log(`Found ${conversations.length} conversations`);
-        addDebugInfo(`Found ${conversations.length} conversations`, conversations);
+        // First, get conversations using the analytics API
+        const conversations = await fetchConversations(start, end);
+        addLog(`Found ${conversations.length} conversations`, 'success');
         
-        // Get surveys for these conversations using the QUALITY API endpoint
+        if (conversations.length === 0) {
+          renderSurveys();
+          msg('No conversations found for the selected date range', 'info');
+          return;
+        }
+        
+        // Get surveys for these conversations
         const surveys = await fetchSurveysForConversations(conversations);
-        console.log(`Found ${surveys.length} surveys`);
-        addDebugInfo(`Found ${surveys.length} surveys`, surveys);
+        addLog(`Found ${surveys.length} surveys`, 'success');
         
         state.surveys = surveys;
-        state.totalConversations = conversations.length;
         
         renderSurveys();
         msg(`Loaded ${surveys.length} surveys from ${conversations.length} conversations.`, 'success');
       } catch(e) { 
         console.error('Error loading surveys:', e); 
         msg('Failed to load surveys: ' + e.message, 'error'); 
-        addDebugInfo(`Error: ${e.message}`);
       } finally { 
         setLoading(btn, false); 
       }
     }
 
     // Fetch conversations using analytics conversations aggregates API
-    async function fetchConversations(start, end, agentIds){
+    async function fetchConversations(start, end){
       const url = `https://api.${config.REGION}/api/v2/analytics/conversations/aggregates/query`;
       
-      // Build the request body according to the correct format
+      // Build the request body
       const body = {
         "interval": `${start.toISOString()}/${end.toISOString()}`,
         "granularity": "P1D",
-        "groupBy": [
-          "conversationId",
-          "userId"
-        ],
-        "metrics": [
-          "nOffered",
-          "tHandle"
-        ],
+        "groupBy": ["conversationId"],
+        "metrics": ["nOffered"],
         "flattenMultivaluedDimensions": false
       };
       
-      // Add filter if agents are selected
-      if(agentIds && agentIds.length > 0){
-        body.filter = {
-          "type": "or",
-          "predicates": agentIds.map(agentId => ({
-            "type": "dimension",
-            "dimension": "userId",
-            "operator": "matches",
-            "value": agentId
-          }))
-        };
-      }
-      
       try {
-        addDebugInfo('Fetching conversations with body:', body);
-        const data = await fetchJsonWithRetry(url, {
+        addLog('Fetching conversations...');
+        const data = await makeApiCall(url, {
           method: 'POST',
           body: JSON.stringify(body)
         });
         
-        addDebugInfo('Conversations API response:', data);
-        
         const conversations = [];
         if(data && data.results && data.results.length > 0){
           data.results.forEach(result => {
-            if(result.group && result.group.conversationId && result.group.userId){
+            if(result.group && result.group.conversationId){
               conversations.push({
-                conversationId: result.group.conversationId,
-                agentId: result.group.userId,
-                tHandle: safeGet(result, 'data[0].stats.tHandle.average', 0)
+                conversationId: result.group.conversationId
               });
             }
           });
           
-          // Remove duplicates (same conversation might appear for different metrics)
+          // Remove duplicates
           const uniqueConversations = Array.from(
             new Map(conversations.map(c => [c.conversationId, c])).values()
           );
           
-          console.log(`Found ${uniqueConversations.length} unique conversations`);
-          addDebugInfo(`Found ${uniqueConversations.length} unique conversations`);
           return uniqueConversations;
         }
         
         return [];
       } catch (error) {
         console.error('Error fetching conversations:', error);
-        addDebugInfo('Error fetching conversations:', error.message);
         throw error;
       }
     }
 
-    // Use the QUALITY API endpoint for surveys instead of analytics aggregates
+    // Fetch surveys for conversations
     async function fetchSurveysForConversations(conversations){
       if(!conversations || conversations.length === 0) {
-        addDebugInfo('No conversations provided to fetch surveys');
         return [];
       }
       
       const allSurveys = [];
       
-      // Process conversations in batches to avoid rate limiting
+      // Process conversations in batches
       const batchSize = 10;
       for(let i = 0; i < conversations.length; i += batchSize){
         const batch = conversations.slice(i, i + batchSize);
-        const batchNumber = Math.floor(i/batchSize) + 1;
-        const totalBatches = Math.ceil(conversations.length/batchSize);
+        addLog(`Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(conversations.length/batchSize)}`);
         
-        addDebugInfo(`Processing survey batch ${batchNumber}/${totalBatches}`);
-        console.log(`Processing survey batch ${batchNumber}/${totalBatches}`);
-        
-        // Process each conversation in the batch in parallel
-        const batchPromises = batch.map(async (conversation) => {
+        // Process each conversation in the batch
+        for (const conversation of batch) {
           try {
-            // Use the QUALITY API endpoint: /api/v2/quality/conversations/{conversationId}/surveys
             const url = `https://api.${config.REGION}/api/v2/quality/conversations/${conversation.conversationId}/surveys`;
             
-            addDebugInfo(`Fetching surveys for conversation: ${conversation.conversationId}`);
+            addLog(`Fetching surveys for: ${conversation.conversationId}`);
+            const surveysData = await makeApiCall(url, { method: 'GET' });
             
-            // Use fetch directly to get better error information
-            const response = await fetch(url, {
-              method: 'GET',
-              headers: {
-                'Authorization': 'Bearer ' + state.accessToken,
-                'Content-Type': 'application/json'
-              }
-            });
-            
-            if(response.ok){
-              const surveysData = await response.json();
-              addDebugInfo(`API response for ${conversation.conversationId}:`, surveysData);
-              
-              if(surveysData && surveysData.entities && surveysData.entities.length > 0){
-                // Filter for completed surveys only (status: "Finished")
-                const completedSurveys = surveysData.entities.filter(s => s.status === "Finished");
-                
-                if(completedSurveys.length > 0) {
-                  addDebugInfo(`Found ${completedSurveys.length} completed surveys for conversation ${conversation.conversationId}`);
-                  
-                  // Get conversation details for more info
-                  const conversationDetails = await fetchConversationDetails(conversation.conversationId);
-                  const agent = state.users.find(u => u.id === conversation.agentId);
-                  
-                  // Process each completed survey for this conversation
-                  return completedSurveys.map(survey => ({
+            if(surveysData && surveysData.entities && surveysData.entities.length > 0){
+              // Process each survey
+              surveysData.entities.forEach(survey => {
+                if (survey.status === "Finished") {
+                  allSurveys.push({
                     conversationId: conversation.conversationId,
                     surveyId: survey.id,
                     score: survey.totalScore || 0,
                     npsScore: survey.npsScore || 0,
-                    conversationStart: conversationDetails?.conversationStart || null,
-                    conversationEnd: conversationDetails?.conversationEnd || null,
-                    mediaType: conversationDetails?.mediaType || 'Unknown',
-                    agentId: conversation.agentId,
-                    agentName: agent ? agent.name : 'Unknown Agent',
-                    customerInfo: conversationDetails?.customerInfo || null,
-                    surveyType: survey.surveyForm?.name || 'Unknown Survey',
-                    questions: parseSurveyQuestions(survey),
-                    submittedDate: survey.completedDate || survey.submittedDate,
+                    submittedDate: survey.completedDate,
                     status: survey.status,
+                    surveyType: survey.surveyType || 'Unknown',
+                    surveyFormName: survey.surveyForm?.name || 'Unknown',
                     answers: survey.answers
-                  }));
-                } else {
-                  addDebugInfo(`No completed surveys for conversation ${conversation.conversationId} (found ${surveysData.entities.length} total surveys)`);
+                  });
                 }
-              } else {
-                addDebugInfo(`No surveys found for conversation ${conversation.conversationId} (empty response)`);
-              }
-            } else if(response.status === 404) {
-              addDebugInfo(`No surveys found for conversation ${conversation.conversationId} (404)`);
-            } else {
-              addDebugInfo(`Error fetching surveys for ${conversation.conversationId}: ${response.status} ${response.statusText}`);
+              });
             }
-            
-            return [];
           } catch (error) {
-            console.error(`Error fetching surveys for conversation ${conversation.conversationId}:`, error);
-            addDebugInfo(`Error fetching surveys for conversation ${conversation.conversationId}: ${error.message}`);
-            return [];
+            // Continue with next conversation even if one fails
+            console.error(`Error fetching surveys for ${conversation.conversationId}:`, error);
           }
-        });
+        }
         
-        // Wait for all promises in this batch
-        const batchResults = await Promise.all(batchPromises);
-        
-        // Flatten the results
-        batchResults.forEach(surveyArray => {
-          if(surveyArray && surveyArray.length > 0){
-            allSurveys.push(...surveyArray);
-          }
-        });
-        
-        // Small delay between batches to be respectful of API limits
+        // Small delay between batches
         if(i + batchSize < conversations.length){
           await sleep(500);
         }
       }
       
-      console.log(`Total completed surveys found: ${allSurveys.length}`);
-      addDebugInfo(`Total completed surveys found: ${allSurveys.length}`);
       return allSurveys;
-    }
-
-    // Helper function to parse survey questions from survey response
-    function parseSurveyQuestions(survey){
-      if(!survey || !survey.answers || !survey.answers.questionGroupScores) return [];
-      
-      const questions = [];
-      
-      // Check for question groups
-      if(survey.answers.questionGroupScores && Array.isArray(survey.answers.questionGroupScores)){
-        survey.answers.questionGroupScores.forEach(group => {
-          if(group.questionScores && Array.isArray(group.questionScores)){
-            group.questionScores.forEach(q => {
-              if(q.questionId){
-                questions.push({
-                  questionId: q.questionId,
-                  score: q.score || q.npsScore || 0,
-                  npsScore: q.npsScore || null,
-                  answerId: q.answerId || null,
-                  markedNA: q.markedNA || false
-                });
-              }
-            });
-          }
-        });
-      }
-      
-      return questions;
-    }
-
-    // Get additional conversation details
-    async function fetchConversationDetails(conversationId){
-      try {
-        // Use conversations details API to get more information
-        const url = `https://api.${config.REGION}/api/v2/analytics/conversations/details/query`;
-        const body = {
-          "interval": "1900-01-01T00:00:00/2100-01-01T00:00:00",
-          "order": "asc",
-          "orderBy": "conversationStart",
-          "paging": {
-            "pageSize": 1,
-            "pageNumber": 1
-          },
-          "segmentFilters": [{
-            "type": "and",
-            "predicates": [{
-              "type": "dimension",
-              "dimension": "conversationId",
-              "operator": "matches",
-              "value": conversationId
-            }]
-          }]
-        };
-        
-        const data = await fetchJsonWithRetry(url, {
-          method: 'POST',
-          body: JSON.stringify(body)
-        });
-        
-        if(data && data.conversations && data.conversations.length > 0){
-          const conversation = data.conversations[0];
-          const participants = conversation.participants || [];
-          
-          // Find customer participant
-          const customerParticipant = participants.find(p => 
-            p.purpose === 'customer' || p.purpose === 'external'
-          );
-          
-          // Find agent participant
-          const agentParticipant = participants.find(p => 
-            p.purpose === 'agent' || (p.user && p.user.id)
-          );
-          
-          return {
-            conversationStart: conversation.conversationStart,
-            conversationEnd: conversation.conversationEnd,
-            mediaType: conversation.mediaType || 'Unknown',
-            customerInfo: customerParticipant ? {
-              name: customerParticipant.name,
-              address: customerParticipant.address,
-              phone: customerParticipant.phone
-            } : null,
-            agentId: agentParticipant?.user?.id || null,
-            agentName: agentParticipant?.user?.name || null
-          };
-        }
-        
-        return null;
-      } catch (error) {
-        console.error('Error fetching conversation details:', error);
-        return null;
-      }
     }
 
     // ===== Render Surveys =====
@@ -1055,7 +620,6 @@
             <div class="label">Surveys Found</div>
           </div>
           <div class="muted">No surveys found for the selected criteria.</div>
-          <div class="muted">Check the debug information below for details.</div>
         `;
         return;
       }
@@ -1064,7 +628,6 @@
       const totalSurveys = state.surveys.length;
       const totalScore = state.surveys.reduce((sum, s) => sum + (s.score || 0), 0);
       const avgScore = totalSurveys > 0 ? totalScore / totalSurveys : 0;
-      const responseRate = state.totalConversations > 0 ? (totalSurveys / state.totalConversations * 100).toFixed(1) : 0;
       
       let html = `
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px;">
@@ -1073,16 +636,12 @@
             <div class="label">Surveys Found</div>
           </div>
           <div class="stat-card">
-            <div class="value">${avgScore.toFixed(1)}</div>
-            <div class="label">Average Score</div>
+            <div class="value">${(avgScore/10).toFixed(1)}</div>
+            <div class="label">Average Score (0-10)</div>
           </div>
           <div class="stat-card">
-            <div class="value">${responseRate}%</div>
-            <div class="label">Response Rate</div>
-          </div>
-          <div class="stat-card">
-            <div class="value">${state.totalConversations}</div>
-            <div class="label">Total Conversations</div>
+            <div class="value">${avgScore.toFixed(1)}%</div>
+            <div class="label">Average Score %</div>
           </div>
         </div>
         
@@ -1090,12 +649,12 @@
           <table>
             <thead>
               <tr>
-                <th>Agent</th>
+                <th>Conversation ID</th>
                 <th>Date</th>
                 <th>Survey Type</th>
                 <th>Score</th>
                 <th>NPS</th>
-                <th>Contact Info</th>
+                <th>Status</th>
                 <th>Details</th>
               </tr>
             </thead>
@@ -1106,39 +665,30 @@
       
       // Sort surveys by date (newest first)
       const sortedSurveys = [...state.surveys].sort((a, b) => {
-        const dateA = a.submittedDate ? new Date(a.submittedDate) : 
-                     (a.conversationStart ? new Date(a.conversationStart) : new Date(0));
-        const dateB = b.submittedDate ? new Date(b.submittedDate) : 
-                     (b.conversationStart ? new Date(b.conversationStart) : new Date(0));
+        const dateA = a.submittedDate ? new Date(a.submittedDate) : new Date(0);
+        const dateB = b.submittedDate ? new Date(b.submittedDate) : new Date(0);
         return dateB - dateA;
       });
       
       sortedSurveys.forEach((survey, surveyIndex) => {
-        const date = survey.submittedDate ? toDateTime(survey.submittedDate) : 
-                    (survey.conversationStart ? toDateTime(survey.conversationStart) : 'Unknown date');
-        const score = survey.score || 0;
+        const date = survey.submittedDate ? toDateTime(survey.submittedDate) : 'Unknown date';
+        const score = survey.score || 0; // This is 0-100 scale
         const npsScore = survey.npsScore || 0;
-        const rating = getRatingLabel(score);
-        const roundedScore = Math.round(score);
-        
-        let contactInfo = '';
-        if(survey.customerInfo){
-          if(survey.customerInfo.phone) contactInfo += `Phone: ${survey.customerInfo.phone}<br>`;
-          if(survey.customerInfo.address) contactInfo += `Contact: ${survey.customerInfo.address}`;
-        }
-        if(!contactInfo) contactInfo = 'No contact info';
+        const rating = getRatingLabel(score / 10); // Convert to 0-10 scale for rating
+        const roundedScore = Math.round(score / 10);
         
         html += `
           <tr class="expandable-row" onclick="toggleSurveyRow(${rowIndex})">
-            <td><strong>${survey.agentName}</strong></td>
+            <td><code style="font-size: 11px;">${survey.conversationId}</code></td>
             <td>${date}</td>
             <td>${survey.surveyType || 'Survey'}</td>
             <td>
               <span class="rating-indicator rating-${roundedScore}"></span>
-              <span class="badge ${rating.badge}">${score.toFixed(1)} - ${rating.label}</span>
+              <span class="badge ${rating.badge}">${(score/10).toFixed(1)} - ${rating.label}</span>
+              <div style="font-size: 11px; color: #6c757d;">${score}%</div>
             </td>
             <td>${npsScore}</td>
-            <td>${contactInfo}</td>
+            <td>${survey.status || 'Unknown'}</td>
             <td><span class="expand-icon">▶</span> Click to expand</td>
           </tr>
           <tr id="survey-row-${rowIndex}" class="expandable-content">
@@ -1147,16 +697,21 @@
                 <div><strong>Conversation ID:</strong> ${survey.conversationId}</div>
                 <div><strong>Survey ID:</strong> ${survey.surveyId}</div>
                 <div><strong>Survey Type:</strong> ${survey.surveyType || 'Unknown'}</div>
+                <div><strong>Survey Form:</strong> ${survey.surveyFormName || 'Unknown'}</div>
                 <div><strong>Status:</strong> ${survey.status || 'Unknown'}</div>
-                <div><strong>Score:</strong> ${score.toFixed(1)}</div>
+                <div><strong>Score:</strong> ${score}% (${(score/10).toFixed(1)}/10)</div>
                 <div><strong>NPS Score:</strong> ${npsScore}</div>
-                ${survey.questions && survey.questions.length > 0 ? `
+                ${survey.answers && survey.answers.questionGroupScores ? `
                   <h5>Question Responses:</h5>
-                  ${survey.questions.map((q, qIndex) => `
+                  ${survey.answers.questionGroupScores.map((group, gIndex) => `
                     <div class="survey-question">
-                      <div><strong>Question ${qIndex + 1}:</strong> ${q.questionId || 'Unknown question'}</div>
-                      <div><strong>Score:</strong> ${q.score.toFixed(1)}</div>
-                      ${q.npsScore ? `<div><strong>NPS Score:</strong> ${q.npsScore}</div>` : ''}
+                      <div><strong>Question Group ${gIndex + 1}:</strong></div>
+                      ${group.questionScores ? group.questionScores.map((q, qIndex) => `
+                        <div style="margin-left: 15px; margin-top: 5px;">
+                          <div><strong>Question ${qIndex + 1}:</strong> ${q.questionId || 'Unknown'}</div>
+                          <div><strong>Score:</strong> ${q.score || q.npsScore || 0}</div>
+                        </div>
+                      `).join('') : '<div>No question scores</div>'}
                     </div>
                   `).join('')}
                 ` : '<div class="muted">No question details available</div>'}
