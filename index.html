@@ -502,6 +502,20 @@
             return data;
           }
           
+          // Log error details for debugging
+          if(response.status === 400) {
+            try {
+              const errorBody = await response.text();
+              console.error('API Error (400):', errorBody);
+              console.error('Request URL:', url);
+              if(options.body) {
+                console.error('Request Body:', options.body);
+              }
+            } catch(e) {
+              console.error('Could not read error response');
+            }
+          }
+          
           if([400,401,403,404].includes(response.status)){
             if(response.status === 401 || response.status === 403) {
               // Token expired
@@ -667,21 +681,20 @@
       }
     }
 
-    // Fetch survey data using analytics aggregates API
+    // Fetch survey data using analytics aggregates API - FIXED VERSION
     async function fetchSurveyAggregates(start, end, agentIds){
       const url = `https://api.${config.REGION}/api/v2/analytics/surveys/aggregates/query`;
       
-      // Build the request body - get conversation-level data with date/time
+      // Build the request body - FIXED: Removed "interval" from groupBy
       const body = {
         "groupBy": [
           "conversationId",
           "userId",
           "surveyFormName",
-          "mediaType",
-          "interval" // Include interval to get date/time
+          "mediaType"
         ],
         "interval": `${start.toISOString()}/${end.toISOString()}`,
-        "granularity": "PT1H", // Hourly granularity to get specific times
+        "granularity": "P1D", // Daily granularity
         "metrics": [
           "oSurveyTotalScore",
           "nSurveyResponses"
@@ -703,11 +716,13 @@
       }
       
       try {
+        console.log('Fetching survey aggregates with body:', JSON.stringify(body, null, 2));
         const data = await fetchJsonWithRetry(url, {
           method: 'POST',
           body: JSON.stringify(body)
         });
         
+        console.log('Survey aggregates response:', data);
         return data;
       } catch (error) {
         console.error('Error fetching survey aggregates:', error);
@@ -761,13 +776,18 @@
         const userId = result.group.userId;
         const formName = result.group.surveyFormName;
         const mediaType = result.group.mediaType;
+        
+        if (!convId || !userId) return;
+        
+        // Get the interval from the data to estimate conversation date
         const interval = result.data[0]?.interval;
+        let conversationDate = new Date(); // Default to current date
         
-        if (!convId || !userId || !interval) return;
-        
-        // Parse the date from the interval (format: "2025-12-08T23:00:00.000Z/2025-12-09T23:00:00.000Z")
-        const dateStr = interval.split('/')[0];
-        const conversationDate = new Date(dateStr);
+        if (interval) {
+          // Parse start of interval as approximate conversation date
+          const dateStr = interval.split('/')[0];
+          conversationDate = new Date(dateStr);
+        }
         
         // Get or create conversation entry
         if (!conversations.has(convId)) {
@@ -785,10 +805,10 @@
         
         const conv = conversations.get(convId);
         
-        // Extract total score from metrics
+        // Extract total score from metrics - use average instead of sum
         result.data[0]?.metrics.forEach(metric => {
-          if (metric.metric === 'oSurveyTotalScore' && metric.stats.sum !== undefined) {
-            conv.totalScore = metric.stats.sum;
+          if (metric.metric === 'oSurveyTotalScore' && metric.stats.average !== undefined) {
+            conv.totalScore = metric.stats.average;
           }
         });
       });
