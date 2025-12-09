@@ -21,7 +21,7 @@
     .section-title{margin:0 0 10px;color:var(--secondary-color)}
     #messageContainer{display:none;margin-top:12px}
     .error-message{color:#b4231a;background:#fee2e2;border:1px solid #fecaca;padding:10px;border-radius:6px}
-    .success-message{color:#14532d;background:#dcfce7;border:1px solid #bbf7d0;padding:10px;border-radius=6px}
+    .success-message{color:#14532d;background:#dcfce7;border:1px solid #bbf7d0;padding:10px;border-radius:6px}
     .info-message{color:#6b4e16;background:#fff7ed;border:1px solid #ffedd5;padding:10px;border-radius:6px}
 
     table{width:100%;border-collapse:collapse;margin-top:12px;border:1px solid var(--border-color);border-radius:6px;overflow:hidden}
@@ -35,7 +35,7 @@
     .cd-trigger .label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
     .cd-trigger .count{background:var(--pill);border:1px solid var(--border-color);border-radius:999px;padding:2px 8px;font-size:12px;color:#2c3e50;flex-shrink:0;margin-left:8px}
     .cd-panel{position:absolute;z-index:1000;margin-top:6px;background:#fff;border:1px solid var(--border-color);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.12);width:100%;max-height:340px;overflow:hidden;display:none;box-sizing:border-box}
-    .cd-panel.open{display=block}
+    .cd-panel.open{display:block}
     .cd-header{padding:10px;border-bottom:1px solid var(--border-color);display:flex;gap:8px;align-items:center}
     .cd-search{flex:1;border:1px solid var(--border-color);border-radius:6px;padding:8px;width:100%;box-sizing:border-box}
     .cd-actions{display:flex;gap:8px}
@@ -370,13 +370,24 @@
       // Set button handler
       document.getElementById('loadBtn').onclick = loadSurveys;
 
-      // Set default dates (last 7 days)
+      // Set default dates (last 7 days) - keep as 7 days default
       const today = new Date();
       const sevenDaysAgo = new Date();
       sevenDaysAgo.setDate(today.getDate() - 7);
       
       document.getElementById('fromDate').value = sevenDaysAgo.toISOString().split('T')[0];
       document.getElementById('toDate').value = today.toISOString().split('T')[0];
+      
+      // Set max date to today for both inputs
+      const todayStr = today.toISOString().split('T')[0];
+      document.getElementById('fromDate').max = todayStr;
+      document.getElementById('toDate').max = todayStr;
+      
+      // Set min date to 90 days ago (allows 90-day search)
+      const ninetyDaysAgo = new Date();
+      ninetyDaysAgo.setDate(today.getDate() - 90);
+      document.getElementById('fromDate').min = ninetyDaysAgo.toISOString().split('T')[0];
+      document.getElementById('toDate').min = ninetyDaysAgo.toISOString().split('T')[0];
 
       // Load users and teams
       Promise.all([fetchAllUsers(), fetchAllTeams()])
@@ -687,9 +698,22 @@
         return;
       }
       
-      const agentIds = await computeSelectedAgentIds();
+      // Validate date range (max 90 days)
       const start = new Date(fromDate + 'T00:00:00');
       const end = new Date(toDate + 'T23:59:59');
+      const diffDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+      
+      if (diffDays > 90) {
+        msg('Date range cannot exceed 90 days. Please select a smaller range.', 'error');
+        return;
+      }
+      
+      if (diffDays < 0) {
+        msg('End date must be after start date.', 'error');
+        return;
+      }
+      
+      const agentIds = await computeSelectedAgentIds();
       
       const btn = document.getElementById('loadBtn'); 
       setLoading(btn, true); 
@@ -723,7 +747,7 @@
       // Build the request body - SIMPLIFIED CORRECT VERSION
       const body = {
         "interval": `${startISO}/${endISO}`,
-        "granularity": "PT1H",  // Hourly granularity
+        "granularity": "P1D",  // Changed to daily granularity for better performance with larger ranges
         "groupBy": [
           "conversationId",
           "userId",
@@ -1000,7 +1024,7 @@
                     <div class="survey-question">
                       <div class="question-text">Is there anything else we could have done to improve your service today?</div>
                       <div><em>Free text response (no score)</em></div>
-                      <div class="muted" style="margin-top: 5px;"></div>
+                      <div class="muted" style="margin-top: 5px;">Sample feedback comment would appear here in a real implementation.</div>
                     </div>
                   </div>
                   `
