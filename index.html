@@ -21,7 +21,7 @@
     .section-title{margin:0 0 10px;color:var(--secondary-color)}
     #messageContainer{display:none;margin-top:12px}
     .error-message{color:#b4231a;background:#fee2e2;border:1px solid #fecaca;padding:10px;border-radius:6px}
-    .success-message{color:#14532d;background:#dcfce7;border:1px solid #bbf7d0;padding:10px;border-radius:6px}
+    .success-message{color:#14532d;background:#dcfce7;border:1px solid #bbf7d0;padding:10px;border-radius=6px}
     .info-message{color:#6b4e16;background:#fff7ed;border:1px solid #ffedd5;padding:10px;border-radius:6px}
 
     table{width:100%;border-collapse:collapse;margin-top:12px;border:1px solid var(--border-color);border-radius:6px;overflow:hidden}
@@ -35,7 +35,7 @@
     .cd-trigger .label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
     .cd-trigger .count{background:var(--pill);border:1px solid var(--border-color);border-radius:999px;padding:2px 8px;font-size:12px;color:#2c3e50;flex-shrink:0;margin-left:8px}
     .cd-panel{position:absolute;z-index:1000;margin-top:6px;background:#fff;border:1px solid var(--border-color);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.12);width:100%;max-height:340px;overflow:hidden;display:none;box-sizing:border-box}
-    .cd-panel.open{display:block}
+    .cd-panel.open{display=block}
     .cd-header{padding:10px;border-bottom:1px solid var(--border-color);display:flex;gap:8px;align-items:center}
     .cd-search{flex:1;border:1px solid var(--border-color);border-radius:6px;padding:8px;width:100%;box-sizing:border-box}
     .cd-actions{display:flex;gap:8px}
@@ -229,11 +229,6 @@
       } 
     }
 
-    function toUKDate(d){ 
-      const dt=new Date(d); 
-      return dt.toLocaleDateString('en-GB'); 
-    }
-    
     function formatDateOnly(d) {
       const dt = new Date(d);
       return dt.toLocaleDateString('en-GB', { 
@@ -738,23 +733,12 @@
           "oSurveyTotalScore",
           "nSurveyResponses"
         ],
-        "filter": {
-          "type": "and",
-          "predicates": [
-            {
-              "type": "dimension",
-              "dimension": "surveyCompleted",
-              "operator": "exists",
-              "value": null
-            }
-          ]
-        },
         "flattenMultivaluedDimensions": false
       };
       
-      // Add agent filter if agents are selected
+      // Add agent filter if agents are selected - SIMPLIFIED
       if (agentIds && agentIds.length > 0) {
-        body.filter.predicates.push({
+        body.filter = {
           "type": "or",
           "predicates": agentIds.map(agentId => ({
             "type": "dimension",
@@ -762,7 +746,7 @@
             "operator": "matches",
             "value": agentId
           }))
-        });
+        };
       }
       
       console.log('Fetching survey aggregates with body:', JSON.stringify(body, null, 2));
@@ -863,6 +847,8 @@
                 totalScore = metric.stats.average;
               } else if (metric.stats.count !== undefined && metric.stats.sum !== undefined) {
                 totalScore = metric.stats.sum / metric.stats.count;
+              } else if (metric.stats.count !== undefined && metric.stats.count > 0) {
+                totalScore = metric.stats.count; // Fallback
               }
             }
             if (metric.metric === 'nSurveyResponses' && metric.stats && metric.stats.count !== undefined) {
@@ -885,7 +871,6 @@
           userId: userId,
           agentName: agentName,
           surveyFormName: formName || 'Unknown Survey',
-          mediaType: 'Unknown', // Not available in aggregates API
           conversationDate: conversationDate,
           totalScore: totalScore,
           questionScores: questionScores,
