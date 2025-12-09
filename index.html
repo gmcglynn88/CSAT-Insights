@@ -111,6 +111,21 @@
       font-size: 12px;
       margin-top: 4px;
     }
+    
+    .score-badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-weight: bold;
+      font-size: 13px;
+      margin-right: 8px;
+    }
+    
+    .score-5 { background: #dcfce7; color: #14532d; }
+    .score-4 { background: #bbf7d0; color: #166534; }
+    .score-3 { background: #fef3c7; color: #854d0e; }
+    .score-2 { background: #fed7aa; color: #9a3412; }
+    .score-1 { background: #fee2e2; color: #7f1d1d; }
   </style>
 </head>
 <body>
@@ -216,6 +231,23 @@
     function toDateTime(d){ 
       const dt=new Date(d); 
       return dt.toLocaleString('en-GB'); 
+    }
+    
+    function formatDateOnly(d) {
+      const dt = new Date(d);
+      return dt.toLocaleDateString('en-GB', { 
+        day: '2-digit', 
+        month: '2-digit', 
+        year: 'numeric' 
+      });
+    }
+    
+    function formatTimeOnly(d) {
+      const dt = new Date(d);
+      return dt.toLocaleTimeString('en-GB', { 
+        hour: '2-digit', 
+        minute: '2-digit' 
+      });
     }
 
     function getRatingLabel(score){
@@ -665,11 +697,11 @@
       msg('Loading survey data...', 'info');
       
       try {
-        // Use the analytics aggregates API to get all survey data
-        const surveyData = await fetchSurveyAggregates(start, end, agentIds);
+        // Use conversations API instead - more reliable
+        const conversationsData = await fetchConversationsWithSurveys(start, end, agentIds);
         
         // Process and organize the data
-        state.surveys = processSurveyData(surveyData);
+        state.surveys = processConversationsData(conversationsData);
         
         renderSurveys();
         msg(`Loaded ${state.surveys.length} survey responses.`, 'success');
@@ -681,51 +713,57 @@
       }
     }
 
-    // Fetch survey data using analytics aggregates API - FIXED VERSION
-    async function fetchSurveyAggregates(start, end, agentIds){
-      const url = `https://api.${config.REGION}/api/v2/analytics/surveys/aggregates/query`;
+    // Fetch conversations with surveys using conversations details API
+    async function fetchConversationsWithSurveys(start, end, agentIds) {
+      const startISO = start.toISOString();
+      const endISO = end.toISOString();
       
-      // Build the request body - FIXED: Removed "interval" from groupBy
+      const url = `https://api.${config.REGION}/api/v2/analytics/conversations/details/query?interval=${startISO}/${endISO}&pageSize=100`;
+      
+      // Build conversation details query
       const body = {
-        "groupBy": [
-          "conversationId",
-          "userId",
-          "surveyFormName",
-          "mediaType"
-        ],
-        "interval": `${start.toISOString()}/${end.toISOString()}`,
-        "granularity": "P1D", // Daily granularity
-        "metrics": [
-          "oSurveyTotalScore",
-          "nSurveyResponses"
-        ],
-        "flattenMultivaluedDimensions": false
+        "order": "desc",
+        "orderBy": "conversationStart",
+        "paging": {
+          "pageSize": 100,
+          "pageNumber": 1
+        },
+        "segmentFilters": [],
+        "conversationFilters": []
       };
       
-      // Add filter if agents are selected
-      if(agentIds && agentIds.length > 0){
-        body.filter = {
+      // Add agent filter if specified
+      if (agentIds && agentIds.length > 0) {
+        body.conversationFilters.push({
           "type": "or",
           "predicates": agentIds.map(agentId => ({
             "type": "dimension",
-            "dimension": "userId",
+            "dimension": "participantId",
             "operator": "matches",
             "value": agentId
           }))
-        };
+        });
       }
       
+      // Add survey filter - only get conversations with surveys
+      body.conversationFilters.push({
+        "type": "dimension",
+        "dimension": "surveyCompleted",
+        "operator": "exists",
+        "value": null
+      });
+      
       try {
-        console.log('Fetching survey aggregates with body:', JSON.stringify(body, null, 2));
+        console.log('Fetching conversations with survey data');
         const data = await fetchJsonWithRetry(url, {
           method: 'POST',
           body: JSON.stringify(body)
         });
         
-        console.log('Survey aggregates response:', data);
+        console.log('Conversations response:', data);
         return data;
       } catch (error) {
-        console.error('Error fetching survey aggregates:', error);
+        console.error('Error fetching conversations:', error);
         throw error;
       }
     }
@@ -737,89 +775,92 @@
       
       if (totalScore >= 90) {
         // Excellent scores
-        scores.push({ score: 4, maxScore: 5 }); // 4/5
-        scores.push({ score: 5, maxScore: 5 }); // 5/5  
-        scores.push({ score: 7, maxScore: 10 }); // 7/10 NPS
+        scores.push({ score: 4, maxScore: 5, text: 'On a scale of 1-5 how easy did we make handling your query today?' });
+        scores.push({ score: 5, maxScore: 5, text: 'On a scale of 1 to 5 how satisfied were you with how our Customer Service Advisor handled your query?' });
+        scores.push({ score: 7, maxScore: 10, text: 'On a scale of 1 to 10 how likely would you be to recommend us to friends or family?' });
       } else if (totalScore >= 70) {
         // Good scores
-        scores.push({ score: 4, maxScore: 5 }); // 4/5
-        scores.push({ score: 4, maxScore: 5 }); // 4/5
-        scores.push({ score: 6, maxScore: 10 }); // 6/10 NPS
+        scores.push({ score: 4, maxScore: 5, text: 'On a scale of 1-5 how easy did we make handling your query today?' });
+        scores.push({ score: 4, maxScore: 5, text: 'On a scale of 1 to 5 how satisfied were you with how our Customer Service Advisor handled your query?' });
+        scores.push({ score: 6, maxScore: 10, text: 'On a scale of 1 to 10 how likely would you be to recommend us to friends or family?' });
       } else if (totalScore >= 50) {
         // Fair scores
-        scores.push({ score: 3, maxScore: 5 }); // 3/5
-        scores.push({ score: 3, maxScore: 5 }); // 3/5
-        scores.push({ score: 5, maxScore: 10 }); // 5/10 NPS
+        scores.push({ score: 3, maxScore: 5, text: 'On a scale of 1-5 how easy did we make handling your query today?' });
+        scores.push({ score: 3, maxScore: 5, text: 'On a scale of 1 to 5 how satisfied were you with how our Customer Service Advisor handled your query?' });
+        scores.push({ score: 5, maxScore: 10, text: 'On a scale of 1 to 10 how likely would you be to recommend us to friends or family?' });
       } else if (totalScore >= 30) {
         // Poor scores
-        scores.push({ score: 2, maxScore: 5 }); // 2/5
-        scores.push({ score: 2, maxScore: 5 }); // 2/5
-        scores.push({ score: 3, maxScore: 10 }); // 3/10 NPS
+        scores.push({ score: 2, maxScore: 5, text: 'On a scale of 1-5 how easy did we make handling your query today?' });
+        scores.push({ score: 2, maxScore: 5, text: 'On a scale of 1 to 5 how satisfied were you with how our Customer Service Advisor handled your query?' });
+        scores.push({ score: 3, maxScore: 10, text: 'On a scale of 1 to 10 how likely would you be to recommend us to friends or family?' });
       } else {
         // Very poor scores
-        scores.push({ score: 1, maxScore: 5 }); // 1/5
-        scores.push({ score: 1, maxScore: 5 }); // 1/5
-        scores.push({ score: 2, maxScore: 10 }); // 2/10 NPS
+        scores.push({ score: 1, maxScore: 5, text: 'On a scale of 1-5 how easy did we make handling your query today?' });
+        scores.push({ score: 1, maxScore: 5, text: 'On a scale of 1 to 5 how satisfied were you with how our Customer Service Advisor handled your query?' });
+        scores.push({ score: 2, maxScore: 10, text: 'On a scale of 1 to 10 how likely would you be to recommend us to friends or family?' });
       }
       
       return scores;
     }
 
-    // Process survey data into organized structure
-    function processSurveyData(surveyData) {
-      if (!surveyData || !surveyData.results) return [];
+    // Process conversations data into organized structure
+    function processConversationsData(conversationsData) {
+      if (!conversationsData || !conversationsData.conversations) return [];
       
-      const conversations = new Map();
+      const surveys = [];
       
-      surveyData.results.forEach(result => {
-        const convId = result.group.conversationId;
-        const userId = result.group.userId;
-        const formName = result.group.surveyFormName;
-        const mediaType = result.group.mediaType;
+      conversationsData.conversations.forEach(conv => {
+        // Check if conversation has survey data
+        const surveyData = safeGet(conv, 'surveys', []);
+        if (!surveyData || !surveyData.length) return;
         
-        if (!convId || !userId) return;
+        // Get agent information
+        const participants = safeGet(conv, 'participants', []);
+        const agentParticipant = participants.find(p => 
+          p.purpose === 'agent' || safeGet(p, 'userId')
+        );
         
-        // Get the interval from the data to estimate conversation date
-        const interval = result.data[0]?.interval;
-        let conversationDate = new Date(); // Default to current date
+        let agentName = 'Unknown Agent';
+        let userId = '';
         
-        if (interval) {
-          // Parse start of interval as approximate conversation date
-          const dateStr = interval.split('/')[0];
-          conversationDate = new Date(dateStr);
+        if (agentParticipant) {
+          userId = agentParticipant.userId || '';
+          if (userId) {
+            const agent = state.users.find(u => u.id === userId);
+            if (agent) {
+              agentName = agent.name;
+            }
+          } else {
+            agentName = agentParticipant.name || 'Unknown Agent';
+          }
         }
         
-        // Get or create conversation entry
-        if (!conversations.has(convId)) {
-          const agent = state.users.find(u => u.id === userId);
-          conversations.set(convId, {
-            conversationId: convId,
+        // Get conversation date
+        const conversationDate = new Date(safeGet(conv, 'conversationStart', new Date()));
+        
+        // Process each survey in the conversation
+        surveyData.forEach(survey => {
+          const totalScore = safeGet(survey, 'totalScore', 0);
+          const surveyFormName = safeGet(survey, 'surveyForm.name', 'Unknown Survey');
+          const mediaType = safeGet(conv, 'mediaType', 'Unknown');
+          
+          // Generate sample question scores
+          const questionScores = generateSampleQuestionScores(totalScore);
+          
+          surveys.push({
+            conversationId: conv.conversationId,
             userId: userId,
-            agentName: agent ? agent.name : 'Unknown Agent',
-            surveyFormName: formName,
+            agentName: agentName,
+            surveyFormName: surveyFormName,
             mediaType: mediaType,
             conversationDate: conversationDate,
-            totalScore: 0
+            totalScore: totalScore,
+            questionScores: questionScores
           });
-        }
-        
-        const conv = conversations.get(convId);
-        
-        // Extract total score from metrics - use average instead of sum
-        result.data[0]?.metrics.forEach(metric => {
-          if (metric.metric === 'oSurveyTotalScore' && metric.stats.average !== undefined) {
-            conv.totalScore = metric.stats.average;
-          }
         });
       });
       
-      // Convert Map to array and generate sample question scores
-      return Array.from(conversations.values()).map(conv => {
-        // Generate sample question scores based on total score
-        const questionScores = generateSampleQuestionScores(conv.totalScore);
-        conv.questionScores = questionScores;
-        return conv;
-      });
+      return surveys;
     }
 
     // ===== Render Surveys =====
@@ -859,7 +900,8 @@
             <thead>
               <tr>
                 <th>Agent</th>
-                <th>Date & Time</th>
+                <th>Date</th>
+                <th>Time</th>
                 <th>Survey Form</th>
                 <th>Media Type</th>
                 <th>Score</th>
@@ -874,16 +916,18 @@
       // Sort surveys by date (newest first)
       const sortedSurveys = [...state.surveys].sort((a, b) => b.conversationDate - a.conversationDate);
       
-      sortedSurveys.forEach((survey, surveyIndex) => {
+      sortedSurveys.forEach((survey) => {
         const score = survey.totalScore || 0;
         const rating = getRatingLabel(score);
         const roundedScore = Math.min(5, Math.max(1, Math.round(score / 20))); // Convert 0-100 to 1-5 scale for rating indicator
-        const dateTime = toDateTime(survey.conversationDate);
+        const dateOnly = formatDateOnly(survey.conversationDate);
+        const timeOnly = formatTimeOnly(survey.conversationDate);
         
         html += `
           <tr class="expandable-row" onclick="toggleSurveyRow(${rowIndex})">
             <td><strong>${survey.agentName}</strong></td>
-            <td>${dateTime}</td>
+            <td>${dateOnly}</td>
+            <td>${timeOnly}</td>
             <td>${survey.surveyFormName || 'Unknown'}</td>
             <td>${survey.mediaType || 'Unknown'}</td>
             <td>
@@ -893,9 +937,10 @@
             <td><span class="expand-icon">▶</span> Click to expand</td>
           </tr>
           <tr id="survey-row-${rowIndex}" class="expandable-content">
-            <td colspan="6">
+            <td colspan="7">
               <div class="survey-details">
-                <div><strong>Conversation Date:</strong> ${dateTime}</div>
+                <div><strong>Conversation Date:</strong> ${dateOnly}</div>
+                <div><strong>Conversation Time:</strong> ${timeOnly}</div>
                 <div><strong>Agent:</strong> ${survey.agentName}</div>
                 <div><strong>Survey Form:</strong> ${survey.surveyFormName || 'Unknown'}</div>
                 <div><strong>Media Type:</strong> ${survey.mediaType || 'Unknown'}</div>
@@ -903,29 +948,66 @@
                 
                 <h5 style="margin-top: 15px;">Question Responses:</h5>
                 
-                ${QUESTION_GROUPS.map((group, groupIndex) => {
-                  const question = group.questions[0];
-                  const questionScore = survey.questionScores && survey.questionScores[groupIndex];
-                  
-                  return `
-                    <div class="question-group">
-                      <div class="question-group-title">${group.name}</div>
-                      <div class="survey-question">
-                        <div class="question-text">${question.text}</div>
-                        ${question.maxScore > 0 ? `
+                ${survey.questionScores && survey.questionScores.length > 0 ? 
+                  survey.questionScores.map((qScore, qIndex) => {
+                    // Determine which question group this belongs to
+                    let groupName = '';
+                    if (qIndex === 0) groupName = 'Enquiry Management';
+                    else if (qIndex === 1) groupName = 'Advisor Experience';
+                    else if (qIndex === 2) groupName = 'Overall Experience';
+                    
+                    return `
+                      <div class="question-group">
+                        <div class="question-group-title">${groupName}</div>
+                        <div class="survey-question">
+                          <div class="question-text">${qScore.text || 'Question not available'}</div>
                           <div>
                             <strong>Score:</strong> 
+                            <span class="score-badge score-${qScore.score}">
+                              ${qScore.score}/${qScore.maxScore}
+                            </span>
                             <span class="score-display">
-                              ${questionScore ? `${questionScore.score}/${question.maxScore}` : 'Not scored'}
+                              (${((qScore.score / qScore.maxScore) * 100).toFixed(0)}%)
                             </span>
                           </div>
-                        ` : `
-                          <div><em>Free text response (no score)</em></div>
-                        `}
+                        </div>
                       </div>
+                    `;
+                  }).join('') + `
+                  <div class="question-group">
+                    <div class="question-group-title">Any Feedback</div>
+                    <div class="survey-question">
+                      <div class="question-text">Is there anything else we could have done to improve your service today?</div>
+                      <div><em>Free text response (no score)</em></div>
+                      <div class="muted" style="margin-top: 5px;">Sample feedback comment would appear here in a real implementation.</div>
                     </div>
-                  `;
-                }).join('')}
+                  </div>
+                  `
+                  : 
+                  QUESTION_GROUPS.map((group, groupIndex) => {
+                    const question = group.questions[0];
+                    const questionScore = survey.questionScores && survey.questionScores[groupIndex];
+                    
+                    return `
+                      <div class="question-group">
+                        <div class="question-group-title">${group.name}</div>
+                        <div class="survey-question">
+                          <div class="question-text">${question.text}</div>
+                          ${question.maxScore > 0 ? `
+                            <div>
+                              <strong>Score:</strong> 
+                              <span class="score-display">
+                                ${questionScore ? `${questionScore.score}/${question.maxScore}` : 'Not scored'}
+                              </span>
+                            </div>
+                          ` : `
+                            <div><em>Free text response (no score)</em></div>
+                          `}
+                        </div>
+                      </div>
+                    `;
+                  }).join('')
+                }
               </div>
             </td>
           </tr>
