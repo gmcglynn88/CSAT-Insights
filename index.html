@@ -367,22 +367,22 @@
         if (data) {
           addLog(`API Response received`, 'success');
           
-          // Show the raw data
-          const container = document.getElementById('surveysContainer');
+          // FIXED: Handle both array response and entities wrapper
+          const surveysArray = Array.isArray(data) ? data : (data.entities || []);
           
-          if (data.entities && data.entities.length > 0) {
-            addLog(`Found ${data.entities.length} survey(s)`, 'success');
+          if (surveysArray.length > 0) {
+            addLog(`Found ${surveysArray.length} survey(s)`, 'success');
             
             // Parse and display each survey
             let html = `
               <div class="stat-card">
-                <div class="value">${data.entities.length}</div>
+                <div class="value">${surveysArray.length}</div>
                 <div class="label">Surveys Found</div>
               </div>
               <h3>Surveys for Conversation: ${conversationId}</h3>
             `;
             
-            data.entities.forEach((survey, index) => {
+            surveysArray.forEach((survey, index) => {
               const score = survey.totalScore || 0;
               const npsScore = survey.npsScore || 0;
               const rating = getRatingLabel(score / 10); // Convert from 0-100 to 0-10 scale
@@ -422,10 +422,11 @@
               `;
             });
             
-            container.innerHTML = html;
-            msg(`Found ${data.entities.length} surveys for conversation ${conversationId}`, 'success');
+            document.getElementById('surveysContainer').innerHTML = html;
+            msg(`Found ${surveysArray.length} surveys for conversation ${conversationId}`, 'success');
           } else {
             addLog('No surveys found in response', 'info');
+            const container = document.getElementById('surveysContainer');
             container.innerHTML = `
               <div class="stat-card">
                 <div class="value">0</div>
@@ -554,7 +555,7 @@
       }
     }
 
-    // Fetch surveys for conversations
+    // Fetch surveys for conversations - FIXED VERSION
     async function fetchSurveysForConversations(conversations){
       if(!conversations || conversations.length === 0) {
         return [];
@@ -576,9 +577,14 @@
             addLog(`Fetching surveys for: ${conversation.conversationId}`);
             const surveysData = await makeApiCall(url, { method: 'GET' });
             
-            if(surveysData && surveysData.entities && surveysData.entities.length > 0){
+            // FIXED: Handle both array response and entities wrapper
+            const surveysArray = Array.isArray(surveysData) ? surveysData : (surveysData?.entities || []);
+            
+            if(surveysArray.length > 0){
+              addLog(`Found ${surveysArray.length} survey(s) for ${conversation.conversationId}`, 'success');
+              
               // Process each survey
-              surveysData.entities.forEach(survey => {
+              surveysArray.forEach(survey => {
                 if (survey.status === "Finished") {
                   allSurveys.push({
                     conversationId: conversation.conversationId,
@@ -589,14 +595,22 @@
                     status: survey.status,
                     surveyType: survey.surveyType || 'Unknown',
                     surveyFormName: survey.surveyForm?.name || 'Unknown',
-                    answers: survey.answers
+                    answers: survey.answers,
+                    agentId: survey.agent?.id,
+                    agentTeamId: survey.agentTeam?.id,
+                    queueId: survey.queue?.id
                   });
+                } else {
+                  addLog(`Skipping survey ${survey.id} with status: ${survey.status}`, 'info');
                 }
               });
+            } else {
+              addLog(`No surveys found for ${conversation.conversationId}`, 'info');
             }
           } catch (error) {
             // Continue with next conversation even if one fails
             console.error(`Error fetching surveys for ${conversation.conversationId}:`, error);
+            addLog(`Error fetching surveys for ${conversation.conversationId}: ${error.message}`, 'error');
           }
         }
         
@@ -606,6 +620,7 @@
         }
       }
       
+      addLog(`Total completed surveys found: ${allSurveys.length}`, 'success');
       return allSurveys;
     }
 
