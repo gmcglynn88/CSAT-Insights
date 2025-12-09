@@ -597,7 +597,7 @@
         const conversations = await fetchConversations(start, end, agentIds);
         console.log(`Found ${conversations.length} conversations`);
         
-        // Get surveys for these conversations
+        // Get surveys for these conversations using the QUALITY API endpoint
         const surveys = await fetchSurveysForConversations(conversations);
         console.log(`Found ${surveys.length} surveys`);
         
@@ -614,7 +614,7 @@
       }
     }
 
-    // UPDATED: Using the correct conversations aggregates API format
+    // Fetch conversations using analytics conversations aggregates API
     async function fetchConversations(start, end, agentIds){
       const url = `https://api.${config.REGION}/api/v2/analytics/conversations/aggregates/query`;
       
@@ -682,89 +682,101 @@
       }
     }
 
-    // Fetch surveys for conversations using surveys aggregates API
+    // UPDATED: Use the QUALITY API endpoint for surveys instead of analytics aggregates
     async function fetchSurveysForConversations(conversations){
       if(!conversations || conversations.length === 0) return [];
       
-      const url = `https://api.${config.REGION}/api/v2/analytics/surveys/aggregates/query`;
-      
-      // Process in small batches
-      const batchSize = 10;
-      const batches = [];
-      for(let i = 0; i < conversations.length; i += batchSize){
-        batches.push(conversations.slice(i, i + batchSize));
-      }
-      
       const allSurveys = [];
       
-      for(const [batchIndex, batch] of batches.entries()){
-        const conversationIds = batch.map(c => c.conversationId).filter(Boolean);
+      // Process conversations in batches to avoid rate limiting
+      const batchSize = 20;
+      for(let i = 0; i < conversations.length; i += batchSize){
+        const batch = conversations.slice(i, i + batchSize);
+        console.log(`Processing survey batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(conversations.length/batchSize)}`);
         
-        if(conversationIds.length === 0) continue;
-        
-        // Use the same format for surveys API
-        const body = {
-          "interval": "1900-01-01T00:00:00/2100-01-01T00:00:00", // Wide date range to get all surveys
-          "granularity": "P1D",
-          "groupBy": ["conversationId", "surveyId"],
-          "metrics": ["nSurveys", "npsScore"],
-          "flattenMultivaluedDimensions": false,
-          "filter": {
-            "type": "or",
-            "predicates": conversationIds.map(conversationId => ({
-              "type": "dimension",
-              "dimension": "conversationId",
-              "operator": "matches",
-              "value": conversationId
-            }))
-          }
-        };
-        
-        try {
-          console.log(`Fetching surveys for batch ${batchIndex + 1}/${batches.length}`);
-          const data = await fetchJsonWithRetry(url, {
-            method: 'POST',
-            body: JSON.stringify(body)
-          });
-          
-          console.log('Surveys API response for batch:', data);
-          
-          if(data && data.results && data.results.length > 0){
-            for(const result of data.results){
-              const conversationId = result.group?.conversationId;
-              const surveyId = result.group?.surveyId;
+        // Process each conversation in the batch in parallel
+        const batchPromises = batch.map(async (conversation) => {
+          try {
+            // Use the QUALITY API endpoint: /api/v2/quality/conversations/{conversationId}/surveys
+            const url = `https://api.${config.REGION}/api/v2/quality/conversations/${conversation.conversationId}/surveys`;
+            
+            const surveysData = await fetchJsonWithRetry(url, {method: 'GET'});
+            
+            if(surveysData && surveysData.entities && surveysData.entities.length > 0){
+              // Get conversation details for more info
+              const conversationDetails = await fetchConversationDetails(conversation.conversationId);
+              const agent = state.users.find(u => u.id === conversation.agentId);
               
-              if(conversationId && surveyId){
-                const conversation = batch.find(c => c.conversationId === conversationId);
-                if(conversation){
-                  // Get conversation details for more info
-                  const conversationDetails = await fetchConversationDetails(conversationId);
-                  const agent = state.users.find(u => u.id === conversation.agentId);
-                  
-                  allSurveys.push({
-                    conversationId: conversationId,
-                    surveyId: surveyId,
-                    npsScore: result.data[0]?.stats?.npsScore || 0,
-                    conversationStart: conversationDetails?.conversationStart || null,
-                    conversationEnd: conversationDetails?.conversationEnd || null,
-                    mediaType: conversationDetails?.mediaType || 'Unknown',
-                    agentId: conversation.agentId,
-                    agentName: agent ? agent.name : 'Unknown Agent',
-                    customerInfo: conversationDetails?.customerInfo || null,
-                    questions: await fetchSurveyQuestions(surveyId, conversationId)
-                  });
-                }
-              }
+              // Process each survey for this conversation
+              return surveysData.entities.map(survey => ({
+                conversationId: conversation.conversationId,
+                surveyId: survey.id,
+                score: survey.totalScore || 0,
+                conversationStart: conversationDetails?.conversationStart || null,
+                conversationEnd: conversationDetails?.conversationEnd || null,
+                mediaType: conversationDetails?.mediaType || 'Unknown',
+                agentId: conversation.agentId,
+                agentName: agent ? agent.name : 'Unknown Agent',
+                customerInfo: conversationDetails?.customerInfo || null,
+                surveyType: survey.surveyForm?.name || 'Unknown Survey',
+                questions: parseSurveyQuestions(survey),
+                submittedDate: survey.submittedDate
+              }));
             }
+            
+            return [];
+          } catch (error) {
+            console.error(`Error fetching surveys for conversation ${conversation.conversationId}:`, error);
+            return [];
           }
-        } catch (error) {
-          console.error('Error fetching surveys batch:', error);
-        }
+        });
         
-        await sleep(500);
+        // Wait for all promises in this batch
+        const batchResults = await Promise.all(batchPromises);
+        
+        // Flatten the results
+        batchResults.forEach(surveyArray => {
+          if(surveyArray && surveyArray.length > 0){
+            allSurveys.push(...surveyArray);
+          }
+        });
+        
+        // Small delay between batches to be respectful of API limits
+        if(i + batchSize < conversations.length){
+          await sleep(500);
+        }
       }
       
+      console.log(`Total surveys found: ${allSurveys.length}`);
       return allSurveys;
+    }
+
+    // Helper function to parse survey questions from survey response
+    function parseSurveyQuestions(survey){
+      if(!survey) return [];
+      
+      const questions = [];
+      
+      // Check for question groups
+      if(survey.questionGroups && Array.isArray(survey.questionGroups)){
+        survey.questionGroups.forEach(group => {
+          if(group.questions && Array.isArray(group.questions)){
+            group.questions.forEach(q => {
+              if(q.questionId){
+                questions.push({
+                  questionId: q.questionId,
+                  questionText: q.text || `Question ${q.questionId}`,
+                  score: q.answerScore || 0,
+                  answerText: q.answerText || '',
+                  markedNA: q.markedNA || false
+                });
+              }
+            });
+          }
+        });
+      }
+      
+      return questions;
     }
 
     // Get additional conversation details
@@ -831,61 +843,6 @@
       }
     }
 
-    // Get survey question details
-    async function fetchSurveyQuestions(surveyId, conversationId){
-      if(!surveyId || !conversationId) return [];
-      
-      try {
-        const url = `https://api.${config.REGION}/api/v2/analytics/surveys/aggregates/query`;
-        const body = {
-          "interval": "1900-01-01T00:00:00/2100-01-01T00:00:00",
-          "granularity": "P1D",
-          "groupBy": ["surveyQuestionId"],
-          "metrics": ["npsScore"],
-          "flattenMultivaluedDimensions": false,
-          "filter": {
-            "type": "and",
-            "predicates": [
-              {
-                "type": "dimension",
-                "dimension": "surveyId",
-                "operator": "matches",
-                "value": surveyId
-              },
-              {
-                "type": "dimension",
-                "dimension": "conversationId",
-                "operator": "matches",
-                "value": conversationId
-              }
-            ]
-          }
-        };
-        
-        const data = await fetchJsonWithRetry(url, {
-          method: 'POST',
-          body: JSON.stringify(body)
-        });
-        
-        const questions = [];
-        if(data && data.results && data.results.length > 0){
-          data.results.forEach(result => {
-            if(result.group && result.group.surveyQuestionId){
-              questions.push({
-                questionId: result.group.surveyQuestionId,
-                score: result.data[0]?.stats?.npsScore || 0
-              });
-            }
-          });
-        }
-        
-        return questions;
-      } catch (error) {
-        console.error('Error fetching survey questions:', error);
-        return [];
-      }
-    }
-
     // ===== Render Surveys =====
     function renderSurveys(){
       const container = document.getElementById('surveysContainer');
@@ -903,7 +860,7 @@
       
       // Calculate statistics
       const totalSurveys = state.surveys.length;
-      const totalScore = state.surveys.reduce((sum, s) => sum + (s.npsScore || 0), 0);
+      const totalScore = state.surveys.reduce((sum, s) => sum + (s.score || 0), 0);
       const avgScore = totalSurveys > 0 ? totalScore / totalSurveys : 0;
       const responseRate = state.totalConversations > 0 ? (totalSurveys / state.totalConversations * 100).toFixed(1) : 0;
       
@@ -933,7 +890,7 @@
               <tr>
                 <th>Agent</th>
                 <th>Date</th>
-                <th>Media Type</th>
+                <th>Survey Type</th>
                 <th>Score</th>
                 <th>Contact Info</th>
                 <th>Details</th>
@@ -952,8 +909,9 @@
       });
       
       sortedSurveys.forEach((survey, surveyIndex) => {
-        const date = survey.conversationStart ? toDateTime(survey.conversationStart) : 'Unknown date';
-        const score = survey.npsScore || 0;
+        const date = survey.submittedDate ? toDateTime(survey.submittedDate) : 
+                    (survey.conversationStart ? toDateTime(survey.conversationStart) : 'Unknown date');
+        const score = survey.score || 0;
         const rating = getRatingLabel(score);
         const roundedScore = Math.round(score);
         
@@ -968,7 +926,7 @@
           <tr class="expandable-row" onclick="toggleSurveyRow(${rowIndex})">
             <td><strong>${survey.agentName}</strong></td>
             <td>${date}</td>
-            <td>${survey.mediaType}</td>
+            <td>${survey.surveyType || 'Survey'}</td>
             <td>
               <span class="rating-indicator rating-${roundedScore}"></span>
               <span class="badge ${rating.badge}">${score.toFixed(1)} - ${rating.label}</span>
@@ -981,12 +939,14 @@
               <div class="survey-details">
                 <div><strong>Conversation ID:</strong> ${survey.conversationId}</div>
                 <div><strong>Survey ID:</strong> ${survey.surveyId}</div>
+                <div><strong>Survey Type:</strong> ${survey.surveyType || 'Unknown'}</div>
                 ${survey.questions && survey.questions.length > 0 ? `
                   <h5>Question Responses:</h5>
                   ${survey.questions.map((q, qIndex) => `
                     <div class="survey-question">
-                      <div><strong>Question ${qIndex + 1}:</strong> ${q.questionId || 'Unknown question'}</div>
+                      <div><strong>Question ${qIndex + 1}:</strong> ${q.questionText || q.questionId || 'Unknown question'}</div>
                       <div><strong>Score:</strong> ${q.score.toFixed(1)}</div>
+                      ${q.answerText ? `<div><strong>Answer:</strong> ${q.answerText}</div>` : ''}
                     </div>
                   `).join('')}
                 ` : '<div class="muted">No question details available</div>'}
