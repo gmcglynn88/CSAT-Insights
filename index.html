@@ -72,6 +72,12 @@
     
     .survey-details { margin-top: 10px; padding-left: 20px; border-left: 3px solid var(--primary-color); }
     .survey-question { margin-bottom: 10px; padding: 10px; background: white; border-radius: 6px; border: 1px solid var(--border-color); }
+    
+    .stat-card { background: #fff; border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .stat-card .value { font-size: 32px; font-weight: bold; color: var(--primary-color); }
+    .stat-card .label { font-size: 14px; color: var(--text-light); margin-top: 8px; }
+    
+    .no-data { text-align: center; padding: 40px; color: var(--text-light); }
   </style>
 </head>
 <body>
@@ -113,7 +119,7 @@
 
     <div class="card">
       <h2 class="section-title">Survey Responses</h2>
-      <div id="surveysContainer"></div>
+      <div id="surveysContainer" class="no-data">Select date range and click "Load Surveys" to begin</div>
     </div>
   </div>
 
@@ -121,15 +127,16 @@
     // ===== OAuth Configuration =====
     const clientId = 'fe305808-b368-4547-8af9-325d28d552bb';
     const config = { REGION: 'mypurecloud.ie' };
-    const redirectUri = 'https://gmcglynn88.github.io/CSAT-insights/';
-    const oauthUrl = 'https://login.mypurecloud.ie/oauth/authorize?client_id=fe305808-b368-4547-8af9-325d28d552bb&response_type=token&redirect_uri=https%3A%2F%2Fgmcglynn88.github.io%2FCSAT-Insights%2F&state=csat';
+    const redirectUri = 'https://gmcglynn88.github.io/QualityReporting/';
+    const oauthUrl = 'https://login.mypurecloud.ie/oauth/authorize?client_id=fe305808-b368-4547-8af9-325d28d552bb&response_type=token&redirect_uri=https%3A%2F%2Fgmcglynn88.github.io%2FQualityReporting%2F&state=csat';
 
     const state = {
       accessToken: null,
       users: [],
       teams: [],
       teamMembers: new Map(),
-      surveys: []
+      surveys: [],
+      totalConversations: 0
     };
 
     const dropdowns = { 
@@ -407,42 +414,62 @@
       let attempt = 0;
       
       while(true){
-        const response = await fetch(url, {
-          ...options,
-          headers: {
-            'Authorization': 'Bearer ' + state.accessToken,
-            'Content-Type': 'application/json',
-            ...(options.headers || {})
+        try {
+          const response = await fetch(url, {
+            ...options,
+            headers: {
+              'Authorization': 'Bearer ' + state.accessToken,
+              'Content-Type': 'application/json',
+              ...(options.headers || {})
+            }
+          });
+          
+          if(response.ok){
+            if(response.status === 204) return null;
+            const data = await response.json();
+            return data;
           }
-        });
-        
-        if(response.ok){
-          if(response.status === 204) return null;
-          return await response.json();
-        }
-        
-        if([400,401,403,404].includes(response.status)){
-          if(response.status === 401 || response.status === 403) {
-            // Token expired
-            sessionStorage.removeItem('purecloud_csat_token');
-            sessionStorage.removeItem('purecloud_csat_token_exp');
-            document.getElementById('appContent').style.display = 'none';
-            document.getElementById('authCard').style.display = 'block';
-            document.getElementById('auth-message').textContent = 'Session expired. Redirecting to login...';
-            document.getElementById('auth-message').className = 'info-message';
-            setTimeout(() => { window.location.href = oauthUrl; }, 2000);
-            throw new Error('Authentication required');
+          
+          // Log error details for debugging
+          if(response.status === 400) {
+            try {
+              const errorBody = await response.text();
+              console.error('API Error (400):', errorBody);
+              console.error('Request URL:', url);
+              if(options.body) {
+                console.error('Request Body:', options.body);
+              }
+            } catch(e) {
+              console.error('Could not read error response');
+            }
           }
-          throw new Error(`HTTP ${response.status}`);
+          
+          if([400,401,403,404].includes(response.status)){
+            if(response.status === 401 || response.status === 403) {
+              // Token expired
+              sessionStorage.removeItem('purecloud_csat_token');
+              sessionStorage.removeItem('purecloud_csat_token_exp');
+              document.getElementById('appContent').style.display = 'none';
+              document.getElementById('authCard').style.display = 'block';
+              document.getElementById('auth-message').textContent = 'Session expired. Redirecting to login...';
+              document.getElementById('auth-message').className = 'info-message';
+              setTimeout(() => { window.location.href = oauthUrl; }, 2000);
+              throw new Error('Authentication required');
+            }
+            throw new Error(`HTTP ${response.status}`);
+          }
+          
+          attempt++;
+          if(attempt > retries){
+            throw new Error(`HTTP ${response.status} after ${retries} retries`);
+          }
+          
+          const delay = Math.round(baseDelay * (2 ** (attempt - 1)) * (1 + Math.random() * 0.25));
+          await sleep(delay);
+        } catch (error) {
+          console.error('Fetch error:', error);
+          throw error;
         }
-        
-        attempt++;
-        if(attempt > retries){
-          throw new Error(`HTTP ${response.status} after ${retries} retries`);
-        }
-        
-        const delay = Math.round(baseDelay * (2 ** (attempt - 1)) * (1 + Math.random() * 0.25));
-        await sleep(delay);
       }
     }
 
@@ -563,10 +590,10 @@
       
       const btn = document.getElementById('loadBtn'); 
       setLoading(btn, true); 
-      msg('Loading surveys...', 'info');
+      msg('Loading conversations and surveys...', 'info');
       
       try {
-        // Get conversations first
+        // First, get conversations using the aggregates API
         const conversations = await fetchConversations(start, end, agentIds);
         console.log(`Found ${conversations.length} conversations`);
         
@@ -575,9 +602,10 @@
         console.log(`Found ${surveys.length} surveys`);
         
         state.surveys = surveys;
+        state.totalConversations = conversations.length;
         
         renderSurveys();
-        msg(`Loaded ${surveys.length} surveys.`, 'success');
+        msg(`Loaded ${surveys.length} surveys from ${conversations.length} conversations.`, 'success');
       } catch(e) { 
         console.error('Error loading surveys:', e); 
         msg('Failed to load surveys: ' + e.message, 'error'); 
@@ -586,62 +614,82 @@
       }
     }
 
+    // UPDATED: Using the correct conversations aggregates API format
     async function fetchConversations(start, end, agentIds){
       const url = `https://api.${config.REGION}/api/v2/analytics/conversations/aggregates/query`;
       
+      // Build the request body according to the correct format
       const body = {
         "interval": `${start.toISOString()}/${end.toISOString()}`,
-        "granularity": "DAY",
-        "groupBy": ["conversationId"],
-        "metrics": ["nConversations"],
-        "filter": {
-          "type": "and",
-          "clauses": []
-        }
+        "granularity": "P1D",
+        "groupBy": [
+          "userId",
+          "conversationId"
+        ],
+        "metrics": [
+          "tHandle"
+        ],
+        "flattenMultivaluedDimensions": false
       };
       
-      // Add agent filter if agents are selected
+      // Add filter if agents are selected
       if(agentIds && agentIds.length > 0){
-        body.filter.clauses.push({
+        body.filter = {
           "type": "or",
           "predicates": agentIds.map(agentId => ({
-            "dimension": "participantId",
+            "type": "dimension",
+            "dimension": "userId",
+            "operator": "matches",
             "value": agentId
           }))
-        });
+        };
       }
       
       try {
+        console.log('Fetching conversations with body:', JSON.stringify(body, null, 2));
         const data = await fetchJsonWithRetry(url, {
           method: 'POST',
           body: JSON.stringify(body)
         });
         
+        console.log('Conversations API response:', data);
+        
         const conversations = [];
         if(data && data.results && data.results.length > 0){
           data.results.forEach(result => {
-            if(result.group && result.group.conversationId){
+            if(result.group && result.group.conversationId && result.group.userId){
               conversations.push({
-                conversationId: result.group.conversationId
+                conversationId: result.group.conversationId,
+                agentId: result.group.userId,
+                // We'll enrich this with more details later
               });
             }
           });
+          
+          // Remove duplicates (same conversation might appear for different metrics)
+          const uniqueConversations = Array.from(
+            new Map(conversations.map(c => [c.conversationId, c])).values()
+          );
+          
+          console.log(`Found ${uniqueConversations.length} unique conversations`);
+          return uniqueConversations;
         }
         
-        return conversations;
+        return [];
       } catch (error) {
         console.error('Error fetching conversations:', error);
         throw error;
       }
     }
 
+    // Fetch surveys for conversations using surveys aggregates API
     async function fetchSurveysForConversations(conversations){
       if(!conversations || conversations.length === 0) return [];
       
       const url = `https://api.${config.REGION}/api/v2/analytics/surveys/aggregates/query`;
       
-      // Process in batches
-      const batchSize = 50;
+      // Process in small batches
+      const batchSize = 10;
       const batches = [];
       for(let i = 0; i < conversations.length; i += batchSize){
         batches.push(conversations.slice(i, i + batchSize));
@@ -649,42 +697,63 @@
       
       const allSurveys = [];
       
-      for(const batch of batches){
-        const conversationIds = batch.map(c => c.conversationId);
+      for(const [batchIndex, batch] of batches.entries()){
+        const conversationIds = batch.map(c => c.conversationId).filter(Boolean);
         
+        if(conversationIds.length === 0) continue;
+        
+        // Use the same format for surveys API
         const body = {
-          "interval": "1900-01-01T00:00:00/2100-01-01T00:00:00",
-          "granularity": "DAY",
+          "interval": "1900-01-01T00:00:00/2100-01-01T00:00:00", // Wide date range to get all surveys
+          "granularity": "P1D",
           "groupBy": ["conversationId", "surveyId"],
-          "metrics": ["nSurveys", "npsScore", "npsPromoterCount", "npsDetractorCount"],
+          "metrics": ["nSurveys", "npsScore"],
+          "flattenMultivaluedDimensions": false,
           "filter": {
-            "type": "and",
-            "clauses": [{
-              "type": "or",
-              "predicates": conversationIds.map(conversationId => ({
-                "dimension": "conversationId",
-                "value": conversationId
-              }))
-            }]
+            "type": "or",
+            "predicates": conversationIds.map(conversationId => ({
+              "type": "dimension",
+              "dimension": "conversationId",
+              "operator": "matches",
+              "value": conversationId
+            }))
           }
         };
         
         try {
+          console.log(`Fetching surveys for batch ${batchIndex + 1}/${batches.length}`);
           const data = await fetchJsonWithRetry(url, {
             method: 'POST',
             body: JSON.stringify(body)
           });
           
+          console.log('Surveys API response for batch:', data);
+          
           if(data && data.results && data.results.length > 0){
-            // Get survey details for each result
             for(const result of data.results){
-              const conversationId = result.group.conversationId;
-              const surveyId = result.group.surveyId;
+              const conversationId = result.group?.conversationId;
+              const surveyId = result.group?.surveyId;
               
-              // Enrich with conversation details
-              const survey = await enrichSurveyWithDetails(conversationId, surveyId, result);
-              if(survey){
-                allSurveys.push(survey);
+              if(conversationId && surveyId){
+                const conversation = batch.find(c => c.conversationId === conversationId);
+                if(conversation){
+                  // Get conversation details for more info
+                  const conversationDetails = await fetchConversationDetails(conversationId);
+                  const agent = state.users.find(u => u.id === conversation.agentId);
+                  
+                  allSurveys.push({
+                    conversationId: conversationId,
+                    surveyId: surveyId,
+                    npsScore: result.data[0]?.stats?.npsScore || 0,
+                    conversationStart: conversationDetails?.conversationStart || null,
+                    conversationEnd: conversationDetails?.conversationEnd || null,
+                    mediaType: conversationDetails?.mediaType || 'Unknown',
+                    agentId: conversation.agentId,
+                    agentName: agent ? agent.name : 'Unknown Agent',
+                    customerInfo: conversationDetails?.customerInfo || null,
+                    questions: await fetchSurveyQuestions(surveyId, conversationId)
+                  });
+                }
               }
             }
           }
@@ -692,18 +761,19 @@
           console.error('Error fetching surveys batch:', error);
         }
         
-        // Small delay to avoid rate limiting
-        await sleep(300);
+        await sleep(500);
       }
       
       return allSurveys;
     }
 
-    async function enrichSurveyWithDetails(conversationId, surveyId, surveyResult){
+    // Get additional conversation details
+    async function fetchConversationDetails(conversationId){
       try {
-        // Get conversation details
-        const convUrl = `https://api.${config.REGION}/api/v2/analytics/conversations/details/query`;
-        const convBody = {
+        // Use conversations details API to get more information
+        const url = `https://api.${config.REGION}/api/v2/analytics/conversations/details/query`;
+        const body = {
+          "interval": "1900-01-01T00:00:00/2100-01-01T00:00:00",
           "order": "asc",
           "orderBy": "conversationStart",
           "paging": {
@@ -713,76 +783,79 @@
           "segmentFilters": [{
             "type": "and",
             "predicates": [{
+              "type": "dimension",
               "dimension": "conversationId",
+              "operator": "matches",
               "value": conversationId
             }]
           }]
         };
         
-        const convData = await fetchJsonWithRetry(convUrl, {
+        const data = await fetchJsonWithRetry(url, {
           method: 'POST',
-          body: JSON.stringify(convBody)
+          body: JSON.stringify(body)
         });
         
-        if(convData && convData.conversations && convData.conversations.length > 0){
-          const conversation = convData.conversations[0];
+        if(data && data.conversations && data.conversations.length > 0){
+          const conversation = data.conversations[0];
           const participants = conversation.participants || [];
           
-          // Find agent
-          const agentParticipant = participants.find(p => 
-            p.purpose === 'agent' || p.purpose === 'acd' || 
-            (p.user && p.user.id)
-          );
-          
-          // Find customer
+          // Find customer participant
           const customerParticipant = participants.find(p => 
             p.purpose === 'customer' || p.purpose === 'external'
           );
           
-          // Get survey question details
-          const questionDetails = await fetchSurveyQuestions(surveyId, conversationId);
+          // Find agent participant
+          const agentParticipant = participants.find(p => 
+            p.purpose === 'agent' || (p.user && p.user.id)
+          );
           
           return {
-            conversationId: conversationId,
-            surveyId: surveyId,
-            npsScore: surveyResult.data[0]?.stats?.npsScore || 0,
             conversationStart: conversation.conversationStart,
             conversationEnd: conversation.conversationEnd,
             mediaType: conversation.mediaType || 'Unknown',
-            agentId: agentParticipant?.user?.id || null,
-            agentName: agentParticipant?.user?.name || 'Unknown Agent',
             customerInfo: customerParticipant ? {
               name: customerParticipant.name,
               address: customerParticipant.address,
               phone: customerParticipant.phone
             } : null,
-            questions: questionDetails
+            agentId: agentParticipant?.user?.id || null,
+            agentName: agentParticipant?.user?.name || null
           };
         }
+        
+        return null;
       } catch (error) {
-        console.error('Error enriching survey:', error);
+        console.error('Error fetching conversation details:', error);
+        return null;
       }
-      
-      return null;
     }
 
+    // Get survey question details
     async function fetchSurveyQuestions(surveyId, conversationId){
+      if(!surveyId || !conversationId) return [];
+      
       try {
         const url = `https://api.${config.REGION}/api/v2/analytics/surveys/aggregates/query`;
         const body = {
           "interval": "1900-01-01T00:00:00/2100-01-01T00:00:00",
-          "granularity": "DAY",
+          "granularity": "P1D",
           "groupBy": ["surveyQuestionId"],
           "metrics": ["npsScore"],
+          "flattenMultivaluedDimensions": false,
           "filter": {
             "type": "and",
-            "clauses": [
+            "predicates": [
               {
+                "type": "dimension",
                 "dimension": "surveyId",
+                "operator": "matches",
                 "value": surveyId
               },
               {
+                "type": "dimension",
                 "dimension": "conversationId",
+                "operator": "matches",
                 "value": conversationId
               }
             ]
@@ -818,13 +891,42 @@
       const container = document.getElementById('surveysContainer');
       
       if(!state.surveys || state.surveys.length === 0){
-        container.innerHTML = '<div class="muted">No surveys found for the selected criteria.</div>';
+        container.innerHTML = `
+          <div class="stat-card">
+            <div class="value">0</div>
+            <div class="label">Surveys Found</div>
+          </div>
+          <div class="muted">No surveys found for the selected criteria.</div>
+        `;
         return;
       }
       
-      const surveysByAgent = groupSurveysByAgent(state.surveys);
+      // Calculate statistics
+      const totalSurveys = state.surveys.length;
+      const totalScore = state.surveys.reduce((sum, s) => sum + (s.npsScore || 0), 0);
+      const avgScore = totalSurveys > 0 ? totalScore / totalSurveys : 0;
+      const responseRate = state.totalConversations > 0 ? (totalSurveys / state.totalConversations * 100).toFixed(1) : 0;
       
       let html = `
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 20px;">
+          <div class="stat-card">
+            <div class="value">${totalSurveys}</div>
+            <div class="label">Surveys Found</div>
+          </div>
+          <div class="stat-card">
+            <div class="value">${avgScore.toFixed(1)}</div>
+            <div class="label">Average Score</div>
+          </div>
+          <div class="stat-card">
+            <div class="value">${responseRate}%</div>
+            <div class="label">Response Rate</div>
+          </div>
+          <div class="stat-card">
+            <div class="value">${state.totalConversations}</div>
+            <div class="label">Total Conversations</div>
+          </div>
+        </div>
+        
         <div class="table-container">
           <table>
             <thead>
@@ -841,91 +943,71 @@
       `;
       
       let rowIndex = 0;
-      for(const [agentName, surveys] of surveysByAgent){
-        surveys.forEach((survey, surveyIndex) => {
-          const date = survey.conversationStart ? toDateTime(survey.conversationStart) : 'Unknown';
-          const score = survey.npsScore || 0;
-          const rating = getRatingLabel(score);
-          const roundedScore = Math.round(score);
-          
-          let contactInfo = '';
-          if(survey.customerInfo){
-            if(survey.customerInfo.phone) contactInfo += `Phone: ${survey.customerInfo.phone}<br>`;
-            if(survey.customerInfo.address) contactInfo += `Contact: ${survey.customerInfo.address}`;
-          }
-          
-          html += `
-            <tr class="expandable-row" onclick="toggleSurveyRow(${rowIndex})">
-              <td><strong>${agentName}</strong></td>
-              <td>${date}</td>
-              <td>${survey.mediaType}</td>
-              <td>
-                <span class="rating-indicator rating-${roundedScore}"></span>
-                <span class="badge ${rating.badge}">${score.toFixed(1)} - ${rating.label}</span>
-              </td>
-              <td>${contactInfo || 'No contact info'}</td>
-              <td><span class="expand-icon">▶</span> Click to expand</td>
-            </tr>
-            <tr id="survey-row-${rowIndex}" class="expandable-content">
-              <td colspan="6">
-                <div class="survey-details">
-                  <h4>Survey Details</h4>
-                  <div><strong>Conversation ID:</strong> ${survey.conversationId}</div>
-                  <div><strong>Survey ID:</strong> ${survey.surveyId}</div>
-                  ${survey.questions && survey.questions.length > 0 ? `
-                    <h5>Question Responses:</h5>
-                    ${survey.questions.map((q, qIndex) => `
-                      <div class="survey-question">
-                        <div><strong>Question ${qIndex + 1}:</strong> ${q.questionId}</div>
-                        <div><strong>Score:</strong> ${q.score.toFixed(1)}</div>
-                      </div>
-                    `).join('')}
-                  ` : '<div class="muted">No question details available</div>'}
-                </div>
-              </td>
-            </tr>
-          `;
-          
-          rowIndex++;
-        });
-      }
+      
+      // Sort surveys by date (newest first)
+      const sortedSurveys = [...state.surveys].sort((a, b) => {
+        const dateA = a.conversationStart ? new Date(a.conversationStart) : new Date(0);
+        const dateB = b.conversationStart ? new Date(b.conversationStart) : new Date(0);
+        return dateB - dateA;
+      });
+      
+      sortedSurveys.forEach((survey, surveyIndex) => {
+        const date = survey.conversationStart ? toDateTime(survey.conversationStart) : 'Unknown date';
+        const score = survey.npsScore || 0;
+        const rating = getRatingLabel(score);
+        const roundedScore = Math.round(score);
+        
+        let contactInfo = '';
+        if(survey.customerInfo){
+          if(survey.customerInfo.phone) contactInfo += `Phone: ${survey.customerInfo.phone}<br>`;
+          if(survey.customerInfo.address) contactInfo += `Contact: ${survey.customerInfo.address}`;
+        }
+        if(!contactInfo) contactInfo = 'No contact info';
+        
+        html += `
+          <tr class="expandable-row" onclick="toggleSurveyRow(${rowIndex})">
+            <td><strong>${survey.agentName}</strong></td>
+            <td>${date}</td>
+            <td>${survey.mediaType}</td>
+            <td>
+              <span class="rating-indicator rating-${roundedScore}"></span>
+              <span class="badge ${rating.badge}">${score.toFixed(1)} - ${rating.label}</span>
+            </td>
+            <td>${contactInfo}</td>
+            <td><span class="expand-icon">▶</span> Click to expand</td>
+          </tr>
+          <tr id="survey-row-${rowIndex}" class="expandable-content">
+            <td colspan="6">
+              <div class="survey-details">
+                <div><strong>Conversation ID:</strong> ${survey.conversationId}</div>
+                <div><strong>Survey ID:</strong> ${survey.surveyId}</div>
+                ${survey.questions && survey.questions.length > 0 ? `
+                  <h5>Question Responses:</h5>
+                  ${survey.questions.map((q, qIndex) => `
+                    <div class="survey-question">
+                      <div><strong>Question ${qIndex + 1}:</strong> ${q.questionId || 'Unknown question'}</div>
+                      <div><strong>Score:</strong> ${q.score.toFixed(1)}</div>
+                    </div>
+                  `).join('')}
+                ` : '<div class="muted">No question details available</div>'}
+              </div>
+            </td>
+          </tr>
+        `;
+        
+        rowIndex++;
+      });
       
       html += `
             </tbody>
           </table>
         </div>
         <div class="muted" style="margin-top:10px">
-          Showing ${state.surveys.length} surveys
+          Showing ${sortedSurveys.length} surveys
         </div>
       `;
       
       container.innerHTML = html;
-    }
-
-    function groupSurveysByAgent(surveys){
-      const grouped = new Map();
-      
-      surveys.forEach(survey => {
-        const agentName = survey.agentName || 'Unknown Agent';
-        if(!grouped.has(agentName)){
-          grouped.set(agentName, []);
-        }
-        grouped.get(agentName).push(survey);
-      });
-      
-      // Sort by agent name
-      const sorted = new Map([...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)));
-      
-      // Sort each agent's surveys by date (newest first)
-      sorted.forEach(surveys => {
-        surveys.sort((a, b) => {
-          const dateA = a.conversationStart ? new Date(a.conversationStart) : new Date(0);
-          const dateB = b.conversationStart ? new Date(b.conversationStart) : new Date(0);
-          return dateB - dateA;
-        });
-      });
-      
-      return sorted;
     }
 
     // ===== Global Functions for HTML =====
