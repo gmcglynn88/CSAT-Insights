@@ -127,8 +127,10 @@
     // ===== OAuth Configuration =====
     const clientId = 'fe305808-b368-4547-8af9-325d28d552bb';
     const config = { REGION: 'mypurecloud.ie' };
+    // FIXED: Updated redirect URI to match your actual GitHub Pages URL
     const redirectUri = 'https://gmcglynn88.github.io/CSAT-Insights/';
-    const oauthUrl = 'https://login.mypurecloud.ie/oauth/authorize?client_id=fe305808-b368-4547-8af9-325d28d552bb&response_type=token&redirect_uri=https%3A%2F%2Fgmcglynn88.github.io%2FCSAT-Insights%2F&state=csat';
+    // FIXED: Updated OAuth URL with correct redirect_uri
+    const oauthUrl = `https://login.mypurecloud.ie/oauth/authorize?client_id=${clientId}&response_type=token&redirect_uri=${encodeURIComponent(redirectUri)}&state=csat`;
 
     const state = {
       accessToken: null,
@@ -682,7 +684,7 @@
       }
     }
 
-    // UPDATED: Use the QUALITY API endpoint for surveys instead of analytics aggregates
+    // Use the QUALITY API endpoint for surveys instead of analytics aggregates
     async function fetchSurveysForConversations(conversations){
       if(!conversations || conversations.length === 0) return [];
       
@@ -903,8 +905,10 @@
       
       // Sort surveys by date (newest first)
       const sortedSurveys = [...state.surveys].sort((a, b) => {
-        const dateA = a.conversationStart ? new Date(a.conversationStart) : new Date(0);
-        const dateB = b.conversationStart ? new Date(b.conversationStart) : new Date(0);
+        const dateA = a.submittedDate ? new Date(a.submittedDate) : 
+                     (a.conversationStart ? new Date(a.conversationStart) : new Date(0));
+        const dateB = b.submittedDate ? new Date(b.submittedDate) : 
+                     (b.conversationStart ? new Date(b.conversationStart) : new Date(0));
         return dateB - dateA;
       });
       
