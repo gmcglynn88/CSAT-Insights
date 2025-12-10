@@ -193,6 +193,16 @@
       font-weight: bold;
       margin-left: 8px;
     }
+    
+    .missing-data-badge {
+      background: #fef3c7;
+      color: #854d0e;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: bold;
+      margin-left: 8px;
+    }
   </style>
 </head>
 <body>
@@ -251,8 +261,8 @@
       teams: [],
       teamMembers: new Map(),
       surveys: [],
-      surveyFormCache: new Map(), // Cache for survey form details
-      questionTextCache: new Map() // Cache for question text by questionId
+      surveyFormCache: new Map(), // Cache for survey form details by conversationId
+      questionDetailsCache: new Map() // Cache for question details by questionId
     };
 
     const dropdowns = { 
@@ -763,26 +773,35 @@
         if (data && data.surveys && data.surveys.length > 0) {
           // Find the completed survey (not error status)
           const completedSurvey = data.surveys.find(s => s.status === 'Finished');
-          if (completedSurvey && completedSurvey.surveyForm) {
-            // Cache the form details
-            state.surveyFormCache.set(conversationId, completedSurvey.surveyForm);
+          if (completedSurvey) {
+            // Store the entire survey response for later use
+            state.surveyFormCache.set(conversationId, completedSurvey);
             
-            // Also cache question texts by questionId
-            if (completedSurvey.surveyForm.questionGroups) {
+            // Also cache question details by questionId for quick lookup
+            if (completedSurvey.surveyForm && completedSurvey.surveyForm.questionGroups) {
               completedSurvey.surveyForm.questionGroups.forEach(group => {
                 if (group.questions) {
                   group.questions.forEach(question => {
-                    state.questionTextCache.set(question.id, {
-                      text: question.text,
-                      groupName: group.name,
-                      maxScore: this.getMaxScoreForQuestion(question)
+                    // Determine max score based on question type
+                    let maxScore = 5; // default
+                    if (question.type === 'npsQuestion') {
+                      maxScore = 10;
+                    } else if (question.type === 'multipleChoiceQuestion' && question.answerOptions) {
+                      maxScore = Math.max(...question.answerOptions.map(opt => opt.value || 0));
+                    }
+                    
+                    state.questionDetailsCache.set(question.id, {
+                      text: question.text || 'Unknown question',
+                      groupName: group.name || 'Unknown group',
+                      maxScore: maxScore,
+                      questionType: question.type
                     });
                   });
                 }
               });
             }
             
-            return completedSurvey.surveyForm;
+            return completedSurvey;
           }
         }
         
@@ -793,14 +812,63 @@
       }
     }
 
-    function getMaxScoreForQuestion(question) {
-      if (question.type === 'npsQuestion') {
-        return 10; // NPS questions are 1-10
-      } else if (question.type === 'multipleChoiceQuestion' && question.answerOptions) {
-        // Find the maximum value from answer options
-        return Math.max(...question.answerOptions.map(opt => opt.value || 0));
+    // ===== Get Question Score from Analytics Data =====
+    function getQuestionScoreFromAnalytics(analyticsData, questionId) {
+      if (!analyticsData || !analyticsData.results) return null;
+      
+      // Find all results for this questionId
+      const questionResults = analyticsData.results.filter(result => 
+        result.group?.surveyQuestionId === questionId
+      );
+      
+      if (questionResults.length === 0) return null;
+      
+      // Look for oSurveyQuestionScore in any of the results
+      for (const result of questionResults) {
+        if (result.data && result.data[0] && result.data[0].metrics) {
+          for (const metric of result.data[0].metrics) {
+            if (metric.metric === 'oSurveyQuestionScore' && metric.stats) {
+              // Return the average score
+              if (metric.stats.average !== undefined && metric.stats.average > 0) {
+                return metric.stats.average;
+              } else if (metric.stats.count !== undefined && metric.stats.sum !== undefined && metric.stats.count > 0) {
+                return metric.stats.sum / metric.stats.count;
+              }
+            }
+          }
+        }
       }
-      return 5; // Default
+      
+      return null;
+    }
+
+    // ===== Get Total Score from Analytics Data =====
+    function getTotalScoreFromAnalytics(analyticsData, conversationId) {
+      if (!analyticsData || !analyticsData.results) return 0;
+      
+      let totalScores = [];
+      
+      // Collect all total scores for this conversation
+      analyticsData.results.forEach(result => {
+        if (result.group?.conversationId === conversationId && 
+            result.data && result.data[0] && result.data[0].metrics) {
+          result.data[0].metrics.forEach(metric => {
+            if (metric.metric === 'oSurveyTotalScore' && metric.stats) {
+              if (metric.stats.average !== undefined && metric.stats.average > 0) {
+                totalScores.push(metric.stats.average);
+              } else if (metric.stats.count !== undefined && metric.stats.sum !== undefined && metric.stats.count > 0) {
+                totalScores.push(metric.stats.sum / metric.stats.count);
+              }
+            }
+          });
+        }
+      });
+      
+      if (totalScores.length === 0) return 0;
+      
+      // Return the average of all total scores for this conversation
+      const sum = totalScores.reduce((acc, score) => acc + score, 0);
+      return sum / totalScores.length;
     }
 
     // ===== Main Survey Loading =====
@@ -839,10 +907,10 @@
         const conversationData = await fetchConversations(start, end);
         
         // STEP 2: Get survey data with ACTUAL question scores
-        const surveyData = await fetchSurveyQuestionAggregates(start, end, agentIds);
+        const surveyAnalyticsData = await fetchSurveyQuestionAggregates(start, end, agentIds);
         
         // STEP 3: Process the combined data
-        state.surveys = await processSurveyData(conversationData, surveyData);
+        state.surveys = await processSurveyData(conversationData, surveyAnalyticsData);
         
         renderSurveys();
         msg(`Loaded ${state.surveys.length} survey responses with actual question scores.`, 'success');
@@ -941,7 +1009,7 @@
     }
 
     // ===== Process Survey Data (COMBINE FORM DETAILS WITH ACTUAL SCORES) =====
-    async function processSurveyData(conversationData, surveyData) {
+    async function processSurveyData(conversationData, surveyAnalyticsData) {
       const surveys = [];
       
       // Create a map of conversationId -> conversation details (for accurate times)
@@ -998,81 +1066,23 @@
         });
       }
       
-      console.log(`Found ${conversationMap.size} conversations and ${surveyData?.results?.length || 0} survey question results`);
+      console.log(`Found ${conversationMap.size} conversations and ${surveyAnalyticsData?.results?.length || 0} survey question results`);
       
-      // Create a map to organize survey data by conversation
-      const surveyMap = new Map();
-      
-      // First, organize all survey question results by conversation
-      if (surveyData && surveyData.results) {
-        for (const result of surveyData.results) {
-          const convId = result.group?.conversationId;
-          const userId = result.group?.userId;
-          const questionId = result.group?.surveyQuestionId;
-          const questionGroupId = result.group?.surveyQuestionGroupId;
-          
-          if (!convId || !userId || !questionId) {
-            continue;
+      // Create a map of conversation IDs that have survey data
+      const conversationsWithSurveyData = new Set();
+      if (surveyAnalyticsData && surveyAnalyticsData.results) {
+        surveyAnalyticsData.results.forEach(result => {
+          if (result.group?.conversationId) {
+            conversationsWithSurveyData.add(result.group.conversationId);
           }
-          
-          // Initialize map entry if not exists
-          if (!surveyMap.has(convId)) {
-            surveyMap.set(convId, {
-              conversationId: convId,
-              userId: userId,
-              questions: new Map(), // questionId -> question data with scores
-              totalScores: []
-            });
-          }
-          
-          const convData = surveyMap.get(convId);
-          
-          // Extract question score and total score
-          let questionScore = null;
-          let totalScore = null;
-          
-          if (result.data && result.data[0] && result.data[0].metrics) {
-            result.data[0].metrics.forEach(metric => {
-              if (metric.metric === 'oSurveyQuestionScore' && metric.stats) {
-                // Get the average score for this question
-                if (metric.stats.average !== undefined && metric.stats.average > 0) {
-                  questionScore = metric.stats.average;
-                } else if (metric.stats.count !== undefined && metric.stats.sum !== undefined && metric.stats.count > 0) {
-                  questionScore = metric.stats.sum / metric.stats.count;
-                }
-              }
-              if (metric.metric === 'oSurveyTotalScore' && metric.stats) {
-                if (metric.stats.average !== undefined && metric.stats.average > 0) {
-                  totalScore = metric.stats.average;
-                } else if (metric.stats.count !== undefined && metric.stats.sum !== undefined && metric.stats.count > 0) {
-                  totalScore = metric.stats.sum / metric.stats.count;
-                }
-              }
-            });
-          }
-          
-          // Store question data
-          const existingQuestion = convData.questions.get(questionId) || {};
-          convData.questions.set(questionId, {
-            ...existingQuestion,
-            questionId: questionId,
-            questionGroupId: questionGroupId,
-            score: questionScore !== null ? questionScore : existingQuestion.score,
-            totalScore: totalScore !== null ? totalScore : existingQuestion.totalScore
-          });
-          
-          // Store total score
-          if (totalScore !== null) {
-            convData.totalScores.push(totalScore);
-          }
-        }
+        });
       }
       
-      console.log(`Organized ${surveyMap.size} conversations with question data`);
+      console.log(`Conversations with survey data: ${conversationsWithSurveyData.size}`);
       
-      // Now create survey objects from the map
-      for (const [convId, convData] of surveyMap) {
-        const userId = convData.userId;
+      // Process each conversation that has survey data
+      for (const convId of conversationsWithSurveyData) {
+        const userId = surveyAnalyticsData.results.find(r => r.group?.conversationId === convId)?.group?.userId;
         
         // Get conversation details from map
         const conversation = conversationMap.get(convId);
@@ -1113,83 +1123,111 @@
           conversationDate = new Date();
         }
         
-        // Calculate average total score
-        let totalScore = 0;
-        if (convData.totalScores.length > 0) {
-          totalScore = convData.totalScores.reduce((sum, score) => sum + score, 0) / convData.totalScores.length;
-        }
+        // Get total score from analytics data
+        const totalScore = getTotalScoreFromAnalytics(surveyAnalyticsData, convId);
         
         // Fetch survey form details to get question texts
+        const surveyFormDetails = await fetchSurveyFormDetails(convId);
         let surveyFormName = 'CSAT Survey';
         const questionScores = [];
         
-        // Try to get survey form details
-        const surveyFormDetails = await fetchSurveyFormDetails(convId);
-        
         if (surveyFormDetails) {
-          surveyFormName = surveyFormDetails.name || 'CSAT Survey';
+          surveyFormName = surveyFormDetails.surveyForm?.name || 'CSAT Survey';
           
-          // Process each question from the analytics data
-          for (const [questionId, questionData] of convData.questions) {
-            // Get question text from cache or form details
-            let questionText = 'Unknown question';
-            let groupName = 'Unknown Group';
-            let maxScore = 5; // Default
-            
-            const cachedQuestion = state.questionTextCache.get(questionId);
-            if (cachedQuestion) {
-              questionText = cachedQuestion.text;
-              groupName = cachedQuestion.groupName;
-              maxScore = cachedQuestion.maxScore;
-            } else if (surveyFormDetails.questionGroups) {
-              // Search for question in form details
-              for (const group of surveyFormDetails.questionGroups) {
-                if (group.questions) {
-                  const question = group.questions.find(q => q.id === questionId);
-                  if (question) {
-                    questionText = question.text;
-                    groupName = group.name;
-                    maxScore = this.getMaxScoreForQuestion(question);
-                    break;
+          // Get all questions from the survey form
+          if (surveyFormDetails.surveyForm?.questionGroups) {
+            surveyFormDetails.surveyForm.questionGroups.forEach(group => {
+              if (group.questions) {
+                group.questions.forEach(question => {
+                  // Get question details from cache
+                  const questionDetails = state.questionDetailsCache.get(question.id);
+                  if (questionDetails) {
+                    // Get actual score from analytics data
+                    const actualScore = getQuestionScoreFromAnalytics(surveyAnalyticsData, question.id);
+                    
+                    if (actualScore !== null) {
+                      // We have an actual score from analytics
+                      questionScores.push({
+                        questionId: question.id,
+                        text: questionDetails.text,
+                        score: actualScore,
+                        maxScore: questionDetails.maxScore,
+                        percentage: questionDetails.maxScore > 0 ? (actualScore / questionDetails.maxScore) * 100 : 0,
+                        group: questionDetails.groupName,
+                        hasActualScore: true,
+                        questionType: questionDetails.questionType
+                      });
+                    } else if (surveyFormDetails.answers && surveyFormDetails.answers.questionGroupScores) {
+                      // Try to get score from survey details API if analytics doesn't have it
+                      for (const groupScore of surveyFormDetails.answers.questionGroupScores) {
+                        if (groupScore.questionScores) {
+                          const questionScore = groupScore.questionScores.find(qs => qs.questionId === question.id);
+                          if (questionScore && questionScore.score !== undefined) {
+                            questionScores.push({
+                              questionId: question.id,
+                              text: questionDetails.text,
+                              score: questionScore.score,
+                              maxScore: questionDetails.maxScore,
+                              percentage: questionDetails.maxScore > 0 ? (questionScore.score / questionDetails.maxScore) * 100 : 0,
+                              group: questionDetails.groupName,
+                              hasActualScore: true,
+                              questionType: questionDetails.questionType,
+                              source: 'survey-details'
+                            });
+                            break;
+                          }
+                        }
+                      }
+                    } else {
+                      // No score available for this question
+                      questionScores.push({
+                        questionId: question.id,
+                        text: questionDetails.text,
+                        score: null,
+                        maxScore: questionDetails.maxScore,
+                        percentage: null,
+                        group: questionDetails.groupName,
+                        hasActualScore: false,
+                        questionType: questionDetails.questionType
+                      });
+                    }
                   }
-                }
+                });
               }
-            }
-            
-            // Only include questions that have scores
-            if (questionData.score !== null && questionData.score !== undefined) {
-              questionScores.push({
-                questionId: questionId,
-                questionGroupId: questionData.questionGroupId,
-                text: questionText,
-                score: questionData.score,
-                maxScore: maxScore,
-                percentage: maxScore > 0 ? (questionData.score / maxScore) * 100 : 0,
-                group: groupName,
-                hasActualScore: true
-              });
-            }
+            });
           }
         } else {
-          // If we can't get form details, still show the scores we have
-          for (const [questionId, questionData] of convData.questions) {
-            if (questionData.score !== null && questionData.score !== undefined) {
+          // If we can't get form details, try to show what we have from analytics
+          // Find unique question IDs from analytics data for this conversation
+          const questionIds = new Set();
+          surveyAnalyticsData.results.forEach(result => {
+            if (result.group?.conversationId === convId && result.group?.surveyQuestionId) {
+              questionIds.add(result.group.surveyQuestionId);
+            }
+          });
+          
+          for (const questionId of questionIds) {
+            const actualScore = getQuestionScoreFromAnalytics(surveyAnalyticsData, questionId);
+            if (actualScore !== null) {
               questionScores.push({
                 questionId: questionId,
-                questionGroupId: questionData.questionGroupId,
                 text: `Question ${questionId.substring(0, 8)}...`,
-                score: questionData.score,
+                score: actualScore,
                 maxScore: 5, // Default guess
-                percentage: 5 > 0 ? (questionData.score / 5) * 100 : 0,
+                percentage: 5 > 0 ? (actualScore / 5) * 100 : 0,
                 group: 'Unknown Group',
-                hasActualScore: true
+                hasActualScore: true,
+                questionType: 'unknown'
               });
             }
           }
         }
         
         // Sort questions by group for better display
-        questionScores.sort((a, b) => a.group.localeCompare(b.group));
+        questionScores.sort((a, b) => {
+          if (a.group === b.group) return a.text.localeCompare(b.text);
+          return a.group.localeCompare(b.group);
+        });
         
         surveys.push({
           conversationId: convId,
@@ -1204,7 +1242,8 @@
           questionScores: questionScores,
           hasAccurateTime: !!conversationStart,
           hasSurveyFormDetails: !!surveyFormDetails,
-          questionCount: questionScores.length
+          questionCount: questionScores.length,
+          questionsWithScores: questionScores.filter(q => q.hasActualScore).length
         });
       }
       
@@ -1232,6 +1271,7 @@
       const surveysWithFormDetails = state.surveys.filter(s => s.hasSurveyFormDetails).length;
       const surveysWithAccurateTime = state.surveys.filter(s => s.hasAccurateTime).length;
       const totalQuestions = state.surveys.reduce((sum, s) => sum + (s.questionCount || 0), 0);
+      const questionsWithScores = state.surveys.reduce((sum, s) => sum + (s.questionsWithScores || 0), 0);
       const totalScore = state.surveys.reduce((sum, s) => sum + (s.totalScore || 0), 0);
       const avgScore = totalSurveys > 0 ? totalScore / totalSurveys : 0;
       
@@ -1246,8 +1286,8 @@
             <div class="label">Average Score</div>
           </div>
           <div class="stat-card">
-            <div class="value">${totalQuestions}</div>
-            <div class="label">Total Questions</div>
+            <div class="value">${questionsWithScores}</div>
+            <div class="label">Questions with Scores</div>
           </div>
           <div class="stat-card">
             <div class="value">${surveysWithAccurateTime}</div>
@@ -1267,6 +1307,14 @@
           ${totalSurveys - surveysWithFormDetails} surveys only have scores without question text.
         </div>
         `}
+        
+        ${questionsWithScores < totalQuestions ? `
+        <div class="warning-note">
+          <strong>Score Availability:</strong> 
+          ${questionsWithScores} of ${totalQuestions} questions have actual scores. 
+          ${totalQuestions - questionsWithScores} questions are missing score data.
+        </div>
+        ` : ''}
         
         ${surveysWithAccurateTime < totalSurveys ? `
         <div class="info-message">
@@ -1305,7 +1353,7 @@
         const duration = formatDuration(survey.duration);
         const dataBadge = survey.hasSurveyFormDetails ? 
           '<span class="success-data-badge">Full Details</span>' : 
-          '<span class="estimated-data-badge">Scores Only</span>';
+          '<span class="missing-data-badge">Scores Only</span>';
         
         html += `
           <tr class="expandable-row" onclick="toggleSurveyRow(${rowIndex})">
@@ -1342,17 +1390,17 @@
                 </div>
                 ` : ''}
                 
-                <h5 style="margin-top: 15px;">Question Responses (Actual Scores):</h5>
+                <h5 style="margin-top: 15px;">Question Responses:</h5>
                 
                 ${survey.questionScores && survey.questionScores.length > 0 ? 
                   survey.questionScores.map((qScore, qIndex) => {
                     const scoreClass = qScore.maxScore === 10 ? 
-                      `score-${Math.min(10, Math.max(1, qScore.score))}` : 
-                      `score-${Math.min(5, Math.max(1, qScore.score))}`;
+                      `score-${Math.min(10, Math.max(1, qScore.score || 0))}` : 
+                      `score-${Math.min(5, Math.max(1, qScore.score || 0))}`;
                     
                     // Clean up question text for display
                     let displayText = qScore.text;
-                    if (displayText.length > 150) {
+                    if (displayText && displayText.length > 150) {
                       displayText = displayText.substring(0, 150) + '...';
                     }
                     
@@ -1363,6 +1411,7 @@
                           <div class="question-text">${displayText}</div>
                           <div>
                             <strong>Score:</strong> 
+                            ${qScore.hasActualScore ? `
                             <span class="score-badge ${scoreClass}">
                               ${qScore.score}/${qScore.maxScore}
                             </span>
@@ -1370,6 +1419,12 @@
                               (${qScore.percentage.toFixed(0)}%)
                             </span>
                             <span class="success-data-badge" style="margin-left: 8px;">Actual Score</span>
+                            ` : `
+                            <span class="score-badge" style="background: #f3f4f6; color: #6b7280;">
+                              No score
+                            </span>
+                            <span class="missing-data-badge" style="margin-left: 8px;">Score Missing</span>
+                            `}
                           </div>
                         </div>
                       </div>
@@ -1401,7 +1456,7 @@
           </table>
         </div>
         <div class="muted" style="margin-top:10px">
-          Showing ${sortedSurveys.length} survey responses (${surveysWithFormDetails} with full question details)
+          Showing ${sortedSurveys.length} survey responses (${surveysWithFormDetails} with full question details, ${questionsWithScores} questions with actual scores)
         </div>
       `;
       
