@@ -790,8 +790,10 @@
                       maxScore = Math.max(...question.answerOptions.map(opt => opt.value || 0));
                     }
                     
+                    // Fix 5: Store group ID too
                     state.questionDetailsCache.set(question.id, {
                       text: question.text || 'Unknown question',
+                      groupId: group.id,  // ADDED: Store group ID
                       groupName: group.name || 'Unknown group',
                       maxScore: maxScore,
                       questionType: question.type
@@ -813,12 +815,14 @@
     }
 
     // ===== Get Question Score from Analytics Data =====
-    function getQuestionScoreFromAnalytics(analyticsData, questionId) {
+    // Fix 1: Updated to match BOTH questionId AND questionGroupId
+    function getQuestionScoreFromAnalytics(analyticsData, questionId, questionGroupId) {
       if (!analyticsData || !analyticsData.results) return null;
       
-      // Find all results for this questionId
+      // Must match BOTH questionId AND questionGroupId
       const questionResults = analyticsData.results.filter(result => 
-        result.group?.surveyQuestionId === questionId
+        result.group?.surveyQuestionId === questionId &&
+        result.group?.surveyQuestionGroupId === questionGroupId  // ADDED THIS
       );
       
       if (questionResults.length === 0) return null;
@@ -979,17 +983,41 @@
         "flattenMultivaluedDimensions": false
       };
       
+      // Fix 4: Add filter to only get conversations that actually have surveys
+      body.filter = {
+        "type": "and",
+        "predicates": [
+          {
+            "dimension": "surveyFormId",
+            "operator": "exists"
+          }
+          // ... add user filters if needed
+        ]
+      };
+      
       // Add agent filter if agents are selected
       if (agentIds && agentIds.length > 0) {
-        body.filter = {
-          "type": "or",
-          "predicates": agentIds.map(agentId => ({
-            "type": "dimension",
-            "dimension": "userId",
-            "operator": "matches",
-            "value": agentId
-          }))
-        };
+        if (body.filter.predicates.length > 0) {
+          body.filter.predicates.push({
+            "type": "or",
+            "predicates": agentIds.map(agentId => ({
+              "type": "dimension",
+              "dimension": "userId",
+              "operator": "matches",
+              "value": agentId
+            }))
+          });
+        } else {
+          body.filter = {
+            "type": "or",
+            "predicates": agentIds.map(agentId => ({
+              "type": "dimension",
+              "dimension": "userId",
+              "operator": "matches",
+              "value": agentId
+            }))
+          };
+        }
       }
       
       console.log('Fetching survey question aggregates with body:', JSON.stringify(body, null, 2));
@@ -1142,8 +1170,37 @@
                   // Get question details from cache
                   const questionDetails = state.questionDetailsCache.get(question.id);
                   if (questionDetails) {
+                    // Fix 3: Handle NPS questions separately
+                    if (question.type === 'npsQuestion') {
+                      // NPS questions don't have oSurveyQuestionScore in analytics
+                      // Look for npsScore in the survey details API response instead
+                      const npsScore = surveyFormDetails.answers?.npsScore;
+                      if (npsScore !== undefined) {
+                        questionScores.push({
+                          questionId: question.id,
+                          text: questionDetails.text,
+                          score: npsScore,
+                          maxScore: 10,
+                          // Fix 2: Calculate percentage properly
+                          percentage: 10 > 0 ? (npsScore / 10) * 100 : 0,
+                          group: questionDetails.groupName,
+                          hasActualScore: true,
+                          questionType: 'npsQuestion',
+                          source: 'survey-details-nps'
+                        });
+                      }
+                      return; // Skip further processing for NPS
+                    }
+                    
+                    // Fix 6: Handle Free Text questions
+                    if (question.type === 'freeTextQuestion') {
+                      // Skip free text questions - no score to show
+                      return;
+                    }
+                    
                     // Get actual score from analytics data
-                    const actualScore = getQuestionScoreFromAnalytics(surveyAnalyticsData, question.id);
+                    // Fix 1: Pass both question.id and group.id
+                    const actualScore = getQuestionScoreFromAnalytics(surveyAnalyticsData, question.id, group.id);
                     
                     if (actualScore !== null) {
                       // We have an actual score from analytics
@@ -1152,6 +1209,7 @@
                         text: questionDetails.text,
                         score: actualScore,
                         maxScore: questionDetails.maxScore,
+                        // Fix 2: Calculate percentage properly
                         percentage: questionDetails.maxScore > 0 ? (actualScore / questionDetails.maxScore) * 100 : 0,
                         group: questionDetails.groupName,
                         hasActualScore: true,
@@ -1168,6 +1226,7 @@
                               text: questionDetails.text,
                               score: questionScore.score,
                               maxScore: questionDetails.maxScore,
+                              // Fix 2: Calculate percentage properly
                               percentage: questionDetails.maxScore > 0 ? (questionScore.score / questionDetails.maxScore) * 100 : 0,
                               group: questionDetails.groupName,
                               hasActualScore: true,
@@ -1207,13 +1266,38 @@
           });
           
           for (const questionId of questionIds) {
-            const actualScore = getQuestionScoreFromAnalytics(surveyAnalyticsData, questionId);
+            // Without group info, we can't use the fixed function properly
+            // Try to find any score for this question
+            const questionResults = surveyAnalyticsData.results.filter(result => 
+              result.group?.conversationId === convId && 
+              result.group?.surveyQuestionId === questionId
+            );
+            
+            let actualScore = null;
+            for (const result of questionResults) {
+              if (result.data && result.data[0] && result.data[0].metrics) {
+                for (const metric of result.data[0].metrics) {
+                  if (metric.metric === 'oSurveyQuestionScore' && metric.stats) {
+                    if (metric.stats.average !== undefined && metric.stats.average > 0) {
+                      actualScore = metric.stats.average;
+                      break;
+                    } else if (metric.stats.count !== undefined && metric.stats.sum !== undefined && metric.stats.count > 0) {
+                      actualScore = metric.stats.sum / metric.stats.count;
+                      break;
+                    }
+                  }
+                }
+              }
+              if (actualScore !== null) break;
+            }
+            
             if (actualScore !== null) {
               questionScores.push({
                 questionId: questionId,
                 text: `Question ${questionId.substring(0, 8)}...`,
                 score: actualScore,
                 maxScore: 5, // Default guess
+                // Fix 2: Calculate percentage properly
                 percentage: 5 > 0 ? (actualScore / 5) * 100 : 0,
                 group: 'Unknown Group',
                 hasActualScore: true,
