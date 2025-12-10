@@ -248,29 +248,12 @@
     const state = {
       accessToken: null,
       users: [],
+      userMap: new Map(),
       teams: [],
       teamMembers: new Map(),
       surveys: [],
-      questionTemplates: [
-        {
-          id: 'csat_ease',
-          text: 'On a scale of 1-5 how easy did we make handling your query today?',
-          maxScore: 5,
-          group: 'Enquiry Management'
-        },
-        {
-          id: 'csat_satisfaction',
-          text: 'On a scale of 1 to 5 how satisfied were you with how our Customer Service Advisor handled your query?',
-          maxScore: 5,
-          group: 'Advisor Experience'
-        },
-        {
-          id: 'csat_nps',
-          text: 'On a scale of 1 to 10 how likely would you be to recommend us to friends or family?',
-          maxScore: 10,
-          group: 'Overall Experience'
-        }
-      ]
+      // conversationId -> { formName, questions: [{ id, text, maxScore, group }] }
+      surveyForms: new Map()
     };
 
     const dropdowns = { 
@@ -360,6 +343,18 @@
       if(score >= 50) return {label: 'Fair', class: 'fair', badge: 'badge-fair'};
       if(score >= 30) return {label: 'Poor', class: 'poor', badge: 'badge-poor'};
       return {label: 'Very Poor', class: 'very-poor', badge: 'badge-very-poor'};
+    }
+
+    function getMetricValue(metric) {
+      if (!metric || !metric.stats) return null;
+      const stats = metric.stats;
+      if (typeof stats.average === 'number') return stats.average;
+      if (typeof stats.sum === 'number' && typeof stats.count === 'number' && stats.count > 0) {
+        return stats.sum / stats.count;
+      }
+      if (typeof stats.max === 'number') return stats.max;
+      if (typeof stats.min === 'number') return stats.min;
+      return null;
     }
 
     // ===== OAuth Flow =====
@@ -617,7 +612,6 @@
             return data;
           }
           
-          // Log complete error details
           const errorText = await response.text();
           console.error('Full API Error Response:', {
             status: response.status,
@@ -662,12 +656,12 @@
       while(next){
         const data = await fetchJsonWithRetry(next, {method: 'GET'});
         
-        if(Array.isArray(data.entities)) all = all.concat(data.entities);
-        else if(Array.isArray(data.users)) all = all.concat(data.users);
+        if(Array.isArray(data?.entities)) all = all.concat(data.entities);
+        else if(Array.isArray(data?.users)) all = all.concat(data.users);
         else if(Array.isArray(data)) all = all.concat(data);
-        else if(data.entities) all = all.concat(data.entities);
+        else if(data?.entities) all = all.concat(data.entities);
         
-        next = data.nextUri ? `https://api.${config.REGION}${data.nextUri}` : null;
+        next = data?.nextUri ? `https://api.${config.REGION}${data.nextUri}` : null;
       }
       
       return all;
@@ -685,7 +679,6 @@
           email: u.email || ''
         })).sort((a, b) => a.name.localeCompare(b.name));
         
-        // Create a lookup map for quick user retrieval by ID
         state.userMap = new Map();
         state.users.forEach(user => {
           state.userMap.set(user.id, user);
@@ -762,65 +755,13 @@
       return Array.from(set);
     }
 
-    // ===== Main Survey Loading =====
-    async function loadSurveys(){
-      const fromDate = document.getElementById('fromDate').value;
-      const toDate = document.getElementById('toDate').value;
-      
-      if(!fromDate || !toDate){
-        msg('Please select both From and To dates.', 'error');
-        return;
-      }
-      
-      // Validate date range (max 90 days)
-      const start = new Date(fromDate + 'T00:00:00.000Z');
-      const end = new Date(toDate + 'T23:59:59.999Z');
-      const diffDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
-      
-      if (diffDays > 90) {
-        msg('Date range cannot exceed 90 days. Please select a smaller range.', 'error');
-        return;
-      }
-      
-      if (diffDays < 0) {
-        msg('End date must be after start date.', 'error');
-        return;
-      }
-      
-      const agentIds = await computeSelectedAgentIds();
-      
-      const btn = document.getElementById('loadBtn'); 
-      setLoading(btn, true); 
-      msg('Loading survey data...', 'info');
-      
-      try {
-        // STEP 1: Get conversations with accurate dates/times
-        const conversationData = await fetchConversations(start, end);
-        
-        // STEP 2: Get survey data with ACTUAL question scores using the new schema
-        const surveyData = await fetchSurveyQuestionAggregates(start, end, agentIds);
-        
-        // STEP 3: Process the combined data
-        state.surveys = await processSurveyData(conversationData, surveyData);
-        
-        renderSurveys();
-        msg(`Loaded ${state.surveys.length} survey responses with actual question scores.`, 'success');
-      } catch(e) { 
-        console.error('Error loading surveys:', e); 
-        msg('Failed to load surveys: ' + e.message, 'error'); 
-      } finally { 
-        setLoading(btn, false); 
-      }
-    }
-
-    // ===== API 1: Conversations Details (ONLY interval) =====
+    // ===== Conversations Details =====
     async function fetchConversations(start, end) {
       const url = `https://api.${config.REGION}/api/v2/analytics/conversations/details/query`;
       
       const startISO = start.toISOString();
       const endISO = end.toISOString();
       
-      // SIMPLE: Only interval - NO filters at all
       const body = {
         "interval": `${startISO}/${endISO}`,
         "order": "desc",
@@ -847,14 +788,76 @@
       }
     }
 
-    // ===== NEW API: Survey Question Aggregates (with actual question scores) =====
+    // ===== Quality Surveys per Conversation (form + questions) =====
+    async function fetchSurveyFormForConversation(conversationId) {
+      try {
+        const url = `https://api.${config.REGION}/api/v2/quality/conversations/${conversationId}/surveys`;
+        const data = await fetchJsonWithRetry(url, { method: 'GET' });
+
+        if (!data) return;
+
+        // Data could be array or object
+        const surveys = Array.isArray(data) ? data
+                       : Array.isArray(data.entities) ? data.entities
+                       : [data];
+
+        if (!surveys.length) return;
+
+        const survey = surveys[0];
+        const form = survey.surveyForm || survey.form || survey;
+
+        if (!form) return;
+
+        const formName = form.name || 'Survey';
+        const questions = [];
+
+        const groups = form.questionGroups || form.questions || [];
+        groups.forEach(group => {
+          const groupName = group.name || group.groupName || '';
+          const qs = group.questions || [];
+          qs.forEach(q => {
+            const qId = q.id || q.questionId;
+            if (!qId) return;
+            const maxScore = q.maxScore || q.maximumScore || q.max || 10;
+
+            questions.push({
+              id: qId,
+              text: q.text || q.label || q.name || 'Question',
+              maxScore: maxScore,
+              group: groupName || 'Questions'
+            });
+          });
+        });
+
+        if (questions.length) {
+          state.surveyForms.set(conversationId, {
+            formName,
+            questions
+          });
+        }
+      } catch (e) {
+        console.error('Failed to fetch survey form for conversation', conversationId, e);
+      }
+    }
+
+    async function fetchSurveyFormsForConversations(conversationIds) {
+      const unique = Array.from(new Set(conversationIds || []));
+      const missing = unique.filter(id => !state.surveyForms.has(id));
+      if (!missing.length) return;
+
+      // Do them sequentially to be kinder to API limits
+      for (const convId of missing) {
+        await fetchSurveyFormForConversation(convId);
+      }
+    }
+
+    // ===== Survey Aggregates (actual scores) =====
     async function fetchSurveyQuestionAggregates(start, end, agentIds) {
       const url = `https://api.${config.REGION}/api/v2/analytics/surveys/aggregates/query`;
       
       const startISO = start.toISOString();
       const endISO = end.toISOString();
       
-      // Use your schema to get ACTUAL question scores
       const body = {
         "interval": `${startISO}/${endISO}`,
         "granularity": "P1D",
@@ -870,8 +873,8 @@
         ],
         "flattenMultivaluedDimensions": false
       };
-      
-      // Add agent filter if agents are selected
+
+      // Optional agent filter
       if (agentIds && agentIds.length > 0) {
         body.filter = {
           "type": "or",
@@ -900,47 +903,95 @@
       }
     }
 
-    // ===== Process Survey Data (UPDATED to use actual question scores) =====
+    // ===== Main Survey Loading =====
+    async function loadSurveys(){
+      const fromDate = document.getElementById('fromDate').value;
+      const toDate = document.getElementById('toDate').value;
+      
+      if(!fromDate || !toDate){
+        msg('Please select both From and To dates.', 'error');
+        return;
+      }
+      
+      const start = new Date(fromDate + 'T00:00:00.000Z');
+      const end = new Date(toDate + 'T23:59:59.999Z');
+      const diffDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+      
+      if (diffDays > 90) {
+        msg('Date range cannot exceed 90 days. Please select a smaller range.', 'error');
+        return;
+      }
+      
+      if (diffDays < 0) {
+        msg('End date must be after start date.', 'error');
+        return;
+      }
+      
+      const agentIds = await computeSelectedAgentIds();
+      
+      const btn = document.getElementById('loadBtn'); 
+      setLoading(btn, true); 
+      msg('Loading survey data...', 'info');
+      
+      try {
+        // 1) Conversations (for IDs + accurate times)
+        const conversationData = await fetchConversations(start, end);
+        const conversationIds = (conversationData?.conversations || [])
+          .map(c => c.conversationId)
+          .filter(Boolean);
+
+        // 2) Survey forms for each conversation (text + question metadata)
+        await fetchSurveyFormsForConversations(conversationIds);
+
+        // 3) Survey aggregates (actual question scores)
+        const surveyData = await fetchSurveyQuestionAggregates(start, end, agentIds);
+        
+        // 4) Combine everything
+        state.surveys = await processSurveyData(conversationData, surveyData);
+        
+        renderSurveys();
+        msg(`Loaded ${state.surveys.length} survey responses with actual question scores.`, 'success');
+      } catch(e) { 
+        console.error('Error loading surveys:', e); 
+        msg('Failed to load surveys: ' + e.message, 'error'); 
+      } finally { 
+        setLoading(btn, false); 
+      }
+    }
+
+    // ===== Process Survey Data (using actual question scores) =====
     async function processSurveyData(conversationData, surveyData) {
       const surveys = [];
       
-      // Create a map of conversationId -> conversation details (for accurate times)
+      // Map conversationId -> details
       const conversationMap = new Map();
       
       if (conversationData && conversationData.conversations) {
         conversationData.conversations.forEach(conversation => {
           const convId = conversation.conversationId;
           if (convId) {
-            // Try to find agent in participants - FIXED AGENT LOOKUP
             let agentName = null;
             let userId = null;
             
             const participants = conversation.participants || [];
             for (const participant of participants) {
-              // Look for agents or users who participated
               if (participant.purpose === 'agent' || participant.purpose === 'user') {
-                // Try different possible locations for user ID
                 userId = participant.participantId || 
                          safeGet(participant, 'userId') ||
                          safeGet(participant, 'user.id');
                 
                 if (userId) {
-                  // Try to find agent in state.users or use participant name
                   const agent = state.userMap ? state.userMap.get(userId) : state.users.find(u => u.id === userId);
                   if (agent) {
                     agentName = agent.name;
                   } else if (participant.name) {
-                    // Fallback to participant name from conversation details
                     agentName = participant.name;
                   }
-                  
-                  // If we found an agent, break
                   if (agentName) break;
                 }
               }
             }
             
-            // If no agent found yet, check other participant types
             if (!agentName) {
               for (const participant of participants) {
                 if (participant.name && participant.name.trim()) {
@@ -964,81 +1015,58 @@
         });
       }
       
-      console.log(`Found ${conversationMap.size} conversations and ${surveyData?.results?.length || 0} survey question results`);
+      console.log(`Found ${conversationMap.size} conversations`);
+
+      // Map conversationId -> aggregates
+      const aggMap = new Map();
       
-      // Create a map to organize survey data by conversation
-      const surveyMap = new Map();
-      
-      // First, organize all survey question results by conversation
-      if (surveyData && surveyData.results) {
+      if (surveyData && Array.isArray(surveyData.results)) {
         for (const result of surveyData.results) {
           const convId = result.group?.conversationId;
           const userId = result.group?.userId;
           const questionId = result.group?.surveyQuestionId;
-          const questionGroupId = result.group?.surveyQuestionGroupId;
           
-          if (!convId || !userId || !questionId) {
-            console.log('Skipping survey result: missing conversationId, userId, or questionId');
-            continue;
-          }
+          if (!convId) continue;
           
-          // Initialize map entry if not exists
-          if (!surveyMap.has(convId)) {
-            surveyMap.set(convId, {
-              conversationId: convId,
-              userId: userId,
-              questions: new Map(), // questionId -> question data
+          if (!aggMap.has(convId)) {
+            aggMap.set(convId, {
+              userId: userId || null,
+              questions: new Map(), // questionId -> { scores: [] }
               totalScores: []
             });
           }
           
-          const convData = surveyMap.get(convId);
+          const convAgg = aggMap.get(convId);
+          if (userId && !convAgg.userId) convAgg.userId = userId;
           
-          // Extract question score and total score
-          let questionScore = 0;
-          let totalScore = 0;
+          let questionScore = null;
+          let totalScore = null;
           
-          if (result.data && result.data[0] && result.data[0].metrics) {
-            result.data[0].metrics.forEach(metric => {
-              if (metric.metric === 'oSurveyQuestionScore' && metric.stats) {
-                if (metric.stats.average !== undefined && metric.stats.average > 0) {
-                  questionScore = metric.stats.average;
-                } else if (metric.stats.count !== undefined && metric.stats.sum !== undefined && metric.stats.count > 0) {
-                  questionScore = metric.stats.sum / metric.stats.count;
-                }
+          if (result.data && result.data[0] && Array.isArray(result.data[0].metrics)) {
+            for (const metric of result.data[0].metrics) {
+              const value = getMetricValue(metric);
+              if (metric.metric === 'oSurveyQuestionScore' && value != null) {
+                questionScore = value;
+              } else if (metric.metric === 'oSurveyTotalScore' && value != null) {
+                totalScore = value;
+                convAgg.totalScores.push(value);
               }
-              if (metric.metric === 'oSurveyTotalScore' && metric.stats) {
-                if (metric.stats.average !== undefined && metric.stats.average > 0) {
-                  totalScore = metric.stats.average;
-                } else if (metric.stats.count !== undefined && metric.stats.sum !== undefined && metric.stats.count > 0) {
-                  totalScore = metric.stats.sum / metric.stats.count;
-                }
-              }
-            });
+            }
           }
           
-          // Store question data
-          convData.questions.set(questionId, {
-            questionId: questionId,
-            questionGroupId: questionGroupId,
-            score: questionScore,
-            totalScore: totalScore
-          });
-          
-          // Store total score (we might get multiple entries, take the max)
-          if (totalScore > 0) {
-            convData.totalScores.push(totalScore);
+          if (questionId) {
+            const q = convAgg.questions.get(questionId) || { questionId, scores: [] };
+            if (questionScore != null) q.scores.push(questionScore);
+            convAgg.questions.set(questionId, q);
           }
         }
       }
-      
-      console.log(`Organized ${surveyMap.size} conversations with question data`);
-      
-      // Now create survey objects from the map
-      for (const [convId, convData] of surveyMap) {
-        const userId = convData.userId;
-        
-        // Get conversation details from map
+
+      console.log(`Aggregates for ${aggMap.size} conversations`);
+
+      // Build final survey list per conversation
+      for (const [convId, convAgg] of aggMap.entries()) {
+        // Conversation + time info
         const conversation = conversationMap.get(convId);
         
         let conversationDate = null;
@@ -1046,106 +1074,79 @@
         let conversationEnd = null;
         let duration = 0;
         let agentName = 'Unknown Agent';
+        let userId = convAgg.userId || null;
         
-        // Use conversation details if available
         if (conversation) {
           conversationStart = conversation.conversationStart;
           conversationEnd = conversation.conversationEnd;
           duration = conversation.duration || 0;
-          
-          // Use actual conversation start time for date
           if (conversationStart) {
             conversationDate = new Date(conversationStart);
           }
-          
-          // Use agent name from conversation details if available
           if (conversation.agentName) {
             agentName = conversation.agentName;
           }
+          if (!userId && conversation.userId) {
+            userId = conversation.userId;
+          }
         }
         
-        // If still no agent name, try to find agent by userId
         if (agentName === 'Unknown Agent' && userId) {
           const agent = state.userMap ? state.userMap.get(userId) : state.users.find(u => u.id === userId);
           if (agent) {
             agentName = agent.name;
           } else {
-            // Last resort: use userId itself
-            agentName = `Agent (${userId.substring(0, 8)}...)`;
+            agentName = `Agent (${String(userId).substring(0, 8)}...)`;
           }
         }
         
-        // If no conversation date from conversation details, use current date
         if (!conversationDate) {
           conversationDate = new Date();
         }
         
-        // Calculate average total score
         let totalScore = 0;
-        if (convData.totalScores.length > 0) {
-          totalScore = convData.totalScores.reduce((sum, score) => sum + score, 0) / convData.totalScores.length;
+        if (convAgg.totalScores.length > 0) {
+          totalScore = convAgg.totalScores.reduce((sum, s) => sum + s, 0) / convAgg.totalScores.length;
         }
-        
-        // Map question scores to our template questions
+
+        // Survey form (questions + text)
+        const formInfo = state.surveyForms.get(convId);
+        const surveyFormName = formInfo?.formName || 'CSAT Survey';
+
         const questionScores = [];
         
-        // For each of our template questions, try to find matching data
-        for (const template of state.questionTemplates) {
-          let foundQuestion = null;
-          let foundScore = 0;
-          let foundMaxScore = template.maxScore;
-          
-          // Try to find this question in the survey data
-          // We need to match by some criteria - for now we'll use text matching
-          // In a real app, you'd want to map question IDs from your survey form
-          for (const [questionId, questionData] of convData.questions) {
-            // Since we don't have question text in aggregates, we'll assign based on order
-            // First question -> ease, second -> satisfaction, third -> nps
-            // This is a simplification - in reality you'd need proper mapping
-            const questionIndex = Array.from(convData.questions.keys()).indexOf(questionId);
+        if (formInfo && Array.isArray(formInfo.questions)) {
+          formInfo.questions.forEach(q => {
+            const qAgg = convAgg.questions.get(q.id);
+            let score = null;
+            let percentage = 0;
             
-            if (template.id === 'csat_ease' && questionIndex === 0) {
-              foundQuestion = questionData;
-              foundScore = questionData.score;
-              break;
-            } else if (template.id === 'csat_satisfaction' && questionIndex === 1) {
-              foundQuestion = questionData;
-              foundScore = questionData.score;
-              break;
-            } else if (template.id === 'csat_nps' && questionIndex === 2) {
-              foundQuestion = questionData;
-              foundScore = questionData.score;
-              break;
+            if (qAgg && qAgg.scores.length > 0) {
+              score = qAgg.scores.reduce((sum, s) => sum + s, 0) / qAgg.scores.length;
+              if (q.maxScore > 0) {
+                percentage = (score / q.maxScore) * 100;
+              }
             }
-          }
-          
-          // If we found a question, use its score
-          // Otherwise, estimate from total score (fallback)
-          let finalScore = foundScore;
-          let isEstimated = !foundQuestion;
-          
-          if (isEstimated && totalScore > 0) {
-            // Estimate score based on total percentage
-            const estimatedPoints = Math.round((totalScore / 100) * template.maxScore);
-            finalScore = Math.min(template.maxScore, Math.max(1, estimatedPoints));
-          }
-          
-          questionScores.push({
-            questionId: template.id,
-            text: template.text,
-            score: finalScore,
-            maxScore: template.maxScore,
-            percentage: template.maxScore > 0 ? (finalScore / template.maxScore) * 100 : 0,
-            isEstimated: isEstimated,
-            group: template.group
+            
+            questionScores.push({
+              questionId: q.id,
+              text: q.text,
+              score: score,
+              maxScore: q.maxScore,
+              percentage: percentage,
+              isEstimated: false, // actual score from Analytics
+              group: q.group
+            });
           });
         }
+
+        const hasRealQuestionData = questionScores.some(q => q.score != null);
         
         surveys.push({
           conversationId: convId,
           userId: userId,
           agentName: agentName,
-          surveyFormName: 'CSAT Survey', // Could get from API if available
+          surveyFormName: surveyFormName,
           conversationDate: conversationDate,
           conversationStart: conversationStart,
           conversationEnd: conversationEnd,
@@ -1153,7 +1154,7 @@
           totalScore: totalScore,
           questionScores: questionScores,
           hasAccurateTime: !!conversationStart,
-          hasRealQuestionData: questionScores.some(q => !q.isEstimated)
+          hasRealQuestionData: hasRealQuestionData
         });
       }
       
@@ -1161,7 +1162,7 @@
       return surveys;
     }
 
-    // ===== Render Surveys (UPDATED) =====
+    // ===== Render Surveys =====
     function renderSurveys(){
       const container = document.getElementById('surveysContainer');
       
@@ -1176,7 +1177,6 @@
         return;
       }
       
-      // Calculate statistics
       const totalSurveys = state.surveys.length;
       const surveysWithRealQuestionData = state.surveys.filter(s => s.hasRealQuestionData).length;
       const surveysWithAccurateTime = state.surveys.filter(s => s.hasAccurateTime).length;
@@ -1195,7 +1195,7 @@
           </div>
           <div class="stat-card">
             <div class="value">${surveysWithRealQuestionData}</div>
-            <div class="label">With Actual Question Scores</div>
+            <div class="label">With Question Scores</div>
           </div>
           <div class="stat-card">
             <div class="value">${surveysWithAccurateTime}</div>
@@ -1203,19 +1203,9 @@
           </div>
         </div>
         
-        ${surveysWithRealQuestionData === totalSurveys ? `
         <div class="success-message">
-          <strong>✓ Success:</strong> 
-          All ${totalSurveys} surveys have actual question-level scores from the Analytics API.
-          No estimated scores are being used.
+          <strong>✓ Scores:</strong> Question-level scores are taken directly from the Analytics Survey Aggregates API (oSurveyQuestionScore).
         </div>
-        ` : `
-        <div class="warning-note">
-          <strong>Note:</strong> 
-          ${surveysWithRealQuestionData} of ${totalSurveys} surveys have actual question scores. 
-          ${totalSurveys - surveysWithRealQuestionData} have estimated question scores where question data wasn't fully available.
-        </div>
-        `}
         
         ${surveysWithAccurateTime < totalSurveys ? `
         <div class="info-message">
@@ -1242,7 +1232,6 @@
       
       let rowIndex = 0;
       
-      // Sort surveys by date (newest first)
       const sortedSurveys = [...state.surveys].sort((a, b) => b.conversationDate - a.conversationDate);
       
       sortedSurveys.forEach((survey) => {
@@ -1253,8 +1242,8 @@
                          `${formatDateOnly(survey.conversationDate)} (approx)`;
         const duration = formatDuration(survey.duration);
         const dataBadge = survey.hasRealQuestionData ? 
-          '<span class="success-data-badge">Actual Scores</span>' : 
-          '<span class="estimated-data-badge">Some Estimated</span>';
+          '<span class="success-data-badge">Question Scores</span>' : 
+          '<span class="estimated-data-badge">No Question Scores</span>';
         
         html += `
           <tr class="expandable-row" onclick="toggleSurveyRow(${rowIndex})">
@@ -1278,26 +1267,19 @@
                 <div><strong>Survey Form:</strong> ${survey.surveyFormName || 'CSAT Survey'}</div>
                 <div><strong>Total Score:</strong> ${score.toFixed(1)}%</div>
                 <div><strong>Conversation ID:</strong> ${survey.conversationId}</div>
-                <div><strong>Data Source:</strong> ${survey.hasRealQuestionData ? 
-                  'Actual question scores from Analytics API' : 
-                  'Some estimated scores (question data not fully available)'}</div>
-                <div><strong>Time Source:</strong> ${survey.hasAccurateTime ? 
-                  'Accurate conversation time' : 
-                  'Approximate time'}</div>
-                
-                ${!survey.hasRealQuestionData ? `
-                <div class="warning-note" style="margin: 15px 0; font-size: 12px;">
-                  <strong>Note:</strong> Some question scores are estimated because complete question-level data wasn't available from the API.
-                </div>
-                ` : ''}
+                <div><strong>Data Source:</strong> Question scores from Analytics Survey Aggregates API (oSurveyQuestionScore)</div>
                 
                 <h5 style="margin-top: 15px;">Question Responses:</h5>
                 
                 ${survey.questionScores && survey.questionScores.length > 0 ? 
-                  survey.questionScores.map((qScore, qIndex) => {
-                    const scoreClass = qScore.maxScore === 10 ? 
-                      `score-${Math.min(10, Math.max(1, qScore.score))}` : 
-                      `score-${Math.min(5, Math.max(1, qScore.score))}`;
+                  survey.questionScores.map((qScore) => {
+                    let scoreClass = '';
+                    if (qScore.score != null) {
+                      const rounded = qScore.maxScore === 10 
+                        ? Math.min(10, Math.max(1, Math.round(qScore.score)))
+                        : Math.min(5, Math.max(1, Math.round(qScore.score)));
+                      scoreClass = `score-${rounded}`;
+                    }
                     
                     return `
                       <div class="question-group">
@@ -1305,15 +1287,18 @@
                         <div class="survey-question">
                           <div class="question-text">${qScore.text || 'Question not available'}</div>
                           <div>
-                            <strong>Score:</strong> 
-                            <span class="score-badge ${scoreClass}">
-                              ${qScore.score}/${qScore.maxScore}
-                            </span>
-                            <span class="score-display">
-                              (${qScore.percentage.toFixed(0)}%)
-                            </span>
-                            ${qScore.isEstimated ? '<span class="estimated-data-badge" style="margin-left: 8px;">Estimated</span>' : 
-                             '<span class="success-data-badge" style="margin-left: 8px;">Actual</span>'}
+                            ${qScore.score != null ? `
+                              <strong>Score:</strong> 
+                              <span class="score-badge ${scoreClass}">
+                                ${qScore.score}/${qScore.maxScore}
+                              </span>
+                              <span class="score-display">
+                                (${qScore.percentage.toFixed(0)}%)
+                              </span>
+                              <span class="success-data-badge" style="margin-left: 8px;">Actual</span>
+                            ` : `
+                              <span class="muted">No numeric score recorded for this question.</span>
+                            `}
                           </div>
                         </div>
                       </div>
@@ -1343,7 +1328,7 @@
           </table>
         </div>
         <div class="muted" style="margin-top:10px">
-          Showing ${sortedSurveys.length} survey responses (${surveysWithRealQuestionData} with actual question scores)
+          Showing ${sortedSurveys.length} survey responses (${surveysWithRealQuestionData} with question-level scores)
         </div>
       `;
       
