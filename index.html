@@ -735,14 +735,14 @@
       
       const btn = document.getElementById('loadBtn'); 
       setLoading(btn, true); 
-      msg('Loading survey data...', 'info');
+      msg('Loading survey data from Analytics Conversations API...', 'info');
       
       try {
-        // Use the SURVEY RESPONSES API to get actual question scores
-        const surveyResponses = await fetchSurveyResponses(start, end, agentIds);
+        // Use the Analytics Conversations API to get survey data
+        const conversationData = await fetchConversationsWithSurveys(start, end, agentIds);
         
         // Process and organize the data
-        state.surveys = processSurveyResponses(surveyResponses);
+        state.surveys = processConversationSurveyData(conversationData);
         
         renderSurveys();
         msg(`Loaded ${state.surveys.length} survey responses.`, 'success');
@@ -754,14 +754,14 @@
       }
     }
 
-    // ===== NEW: Fetch Survey Responses (NOT aggregates) =====
-    async function fetchSurveyResponses(start, end, agentIds) {
-      const url = `https://api.${config.REGION}/api/v2/analytics/surveys/responses/query`;
+    // ===== FIXED: Use Analytics Conversations API (not Surveys API) =====
+    async function fetchConversationsWithSurveys(start, end, agentIds) {
+      const url = `https://api.${config.REGION}/api/v2/analytics/conversations/details/query`;
       
       const startISO = start.toISOString();
       const endISO = end.toISOString();
       
-      // Build the request body for survey RESPONSES (not aggregates)
+      // Build the request body to get conversations with surveys
       const body = {
         "interval": `${startISO}/${endISO}`,
         "order": "desc",
@@ -770,6 +770,18 @@
           "pageSize": 100,
           "pageNumber": 1
         },
+        "conversationFilters": [
+          {
+            "type": "and",
+            "predicates": [
+              {
+                "type": "dimension",
+                "dimension": "surveyFormName",
+                "operator": "exists"
+              }
+            ]
+          }
+        ],
         "segmentFilters": [
           {
             "type": "and",
@@ -785,7 +797,22 @@
         ]
       };
       
-      console.log('Fetching survey RESPONSES with body:', JSON.stringify(body, null, 2));
+      // Add agent filter if agents are selected
+      if (agentIds && agentIds.length > 0) {
+        // Note: In conversations API, agent filtering might use "participantId" or "userId"
+        // Try participantId first, as that's often used in conversations
+        body.segmentFilters[0].predicates.push({
+          "type": "or",
+          "predicates": agentIds.map(agentId => ({
+            "type": "dimension",
+            "dimension": "participantId",
+            "operator": "matches",
+            "value": agentId
+          }))
+        });
+      }
+      
+      console.log('Fetching conversations with surveys:', JSON.stringify(body, null, 2));
       
       try {
         const data = await fetchJsonWithRetry(url, {
@@ -793,40 +820,39 @@
           body: JSON.stringify(body)
         });
         
-        console.log('Survey RESPONSES response:', data);
+        console.log('Conversations with surveys response:', data);
         return data;
       } catch (error) {
-        console.error('Error fetching survey responses:', error);
+        console.error('Error fetching conversations with surveys:', error);
         throw error;
       }
     }
 
-    // Process survey responses to extract actual question scores
-    function processSurveyResponses(surveyData) {
-      if (!surveyData || !surveyData.results) {
-        console.log('No survey response data found');
+    // Process conversation data to extract survey information
+    function processConversationSurveyData(conversationData) {
+      if (!conversationData || !conversationData.conversations) {
+        console.log('No conversation data found');
         return [];
       }
       
       const surveys = [];
       
-      console.log(`Processing ${surveyData.results.length} survey responses`);
+      console.log(`Processing ${conversationData.conversations.length} conversations with surveys`);
       
-      surveyData.results.forEach((result, index) => {
-        const convId = result.conversationId;
-        const userId = result.userId;
+      conversationData.conversations.forEach((conversation, index) => {
+        const convId = conversation.conversationId;
         
-        if (!convId || !userId) {
-          console.log(`Skipping survey response ${index}: missing conversationId or userId`);
+        if (!convId) {
+          console.log(`Skipping conversation ${index}: missing conversationId`);
           return;
         }
         
-        // Get conversation start time
-        const conversationStart = result.conversationStart;
+        // Get conversation details
+        const conversationStart = conversation.conversationStart;
+        const conversationEnd = conversation.conversationEnd;
         let conversationDate = conversationStart ? new Date(conversationStart) : new Date();
         
-        // Get conversation duration if available
-        const conversationEnd = result.conversationEnd;
+        // Get duration
         let duration = 0;
         if (conversationStart && conversationEnd) {
           const start = new Date(conversationStart);
@@ -834,24 +860,108 @@
           duration = Math.round((end - start) / 1000);
         }
         
-        // Find agent name
-        const agent = state.users.find(u => u.id === userId);
-        const agentName = agent ? agent.name : 'Unknown Agent';
+        // Extract survey data from segments
+        const segments = conversation.segments || [];
+        const participants = conversation.participants || [];
         
-        // Extract survey form name
-        const formName = result.surveyFormName || 'Unknown Survey';
+        // Find agent participant
+        let agentParticipant = null;
+        let userId = null;
+        let agentName = 'Unknown Agent';
         
-        // Extract ACTUAL question scores from survey responses
-        const questionScores = extractActualQuestionScores(result);
+        // Look for agent in participants
+        for (const participant of participants) {
+          if (participant.purpose === 'agent' || participant.purpose === 'user') {
+            agentParticipant = participant;
+            userId = participant.participantId;
+            
+            // Find agent name from state.users
+            const agent = state.users.find(u => u.id === userId);
+            if (agent) {
+              agentName = agent.name;
+            }
+            break;
+          }
+        }
         
-        // Calculate total score from actual question scores
-        const totalScore = calculateTotalScoreFromQuestions(questionScores);
+        // If no agent found in participants, try to find from segments
+        if (!agentParticipant) {
+          for (const segment of segments) {
+            if (segment.participantPurpose === 'agent' || segment.participantPurpose === 'user') {
+              userId = segment.participantId;
+              const agent = state.users.find(u => u.id === userId);
+              if (agent) {
+                agentName = agent.name;
+              }
+              break;
+            }
+          }
+        }
+        
+        // Extract survey data from segments
+        let surveyFormName = 'Unknown Survey';
+        let totalScore = 0;
+        let questionScores = [];
+        
+        for (const segment of segments) {
+          // Check for survey data in segment
+          if (segment.surveys && Array.isArray(segment.surveys)) {
+            for (const survey of segment.surveys) {
+              if (survey.surveyFormName) {
+                surveyFormName = survey.surveyFormName;
+              }
+              
+              // Extract total score
+              if (survey.totalScore !== undefined) {
+                totalScore = survey.totalScore;
+              }
+              
+              // Extract question scores
+              if (survey.questionResponses) {
+                questionScores = extractQuestionScoresFromSurvey(survey);
+              }
+              
+              // Also check for questionGroupScores
+              if (survey.questionGroupScores && Array.isArray(survey.questionGroupScores)) {
+                questionScores = extractQuestionScoresFromGroups(survey.questionGroupScores);
+              }
+            }
+          }
+          
+          // Check for survey in other fields
+          if (segment.surveyFormName) {
+            surveyFormName = segment.surveyFormName;
+          }
+          if (segment.surveyTotalScore !== undefined) {
+            totalScore = segment.surveyTotalScore;
+          }
+        }
+        
+        // If no survey data found in segments, check conversation level
+        if (conversation.surveys && Array.isArray(conversation.surveys)) {
+          for (const survey of conversation.surveys) {
+            if (survey.surveyFormName) {
+              surveyFormName = survey.surveyFormName;
+            }
+            if (survey.totalScore !== undefined) {
+              totalScore = survey.totalScore;
+            }
+            if (survey.questionResponses) {
+              questionScores = extractQuestionScoresFromSurvey(survey);
+            }
+          }
+        }
+        
+        // Calculate total score if not provided but we have question scores
+        if (totalScore === 0 && questionScores.length > 0) {
+          totalScore = calculateTotalScoreFromQuestions(questionScores);
+        }
         
         surveys.push({
           conversationId: convId,
           userId: userId,
           agentName: agentName,
-          surveyFormName: formName,
+          surveyFormName: surveyFormName,
           conversationDate: conversationDate,
           conversationStart: conversationStart,
           conversationEnd: conversationEnd,
@@ -859,47 +969,20 @@
           totalScore: totalScore,
           questionScores: questionScores,
           hasAccurateTime: !!conversationStart,
-          isEstimatedScores: false // Now using ACTUAL scores
+          isEstimatedScores: false // Using actual scores from conversations API
         });
       });
       
-      console.log(`Processed ${surveys.length} surveys with actual scores`);
+      console.log(`Processed ${surveys.length} surveys from conversations API`);
       return surveys;
     }
 
-    // Extract ACTUAL question scores from survey response
-    function extractActualQuestionScores(surveyResponse) {
+    // Extract question scores from survey object
+    function extractQuestionScoresFromSurvey(survey) {
       const questionScores = [];
       
-      // Try to extract from surveyQuestionGroupScore
-      if (surveyResponse.surveyQuestionGroupScore && Array.isArray(surveyResponse.surveyQuestionGroupScore)) {
-        surveyResponse.surveyQuestionGroupScore.forEach(group => {
-          if (group.surveyQuestionScore && Array.isArray(group.surveyQuestionScore)) {
-            group.surveyQuestionScore.forEach(qScore => {
-              // Map to your question structure
-              const questionText = qScore.questionText || '';
-              const answerText = qScore.answerText || '';
-              const score = parseFloat(qScore.score) || 0;
-              const maxScore = parseFloat(qScore.maxScore) || 0;
-              
-              // Only add if it's a scored question (not free text)
-              if (maxScore > 0) {
-                questionScores.push({
-                  text: questionText,
-                  answerText: answerText,
-                  score: score,
-                  maxScore: maxScore,
-                  percentage: maxScore > 0 ? (score / maxScore) * 100 : 0
-                });
-              }
-            });
-          }
-        });
-      }
-      
-      // If no scores found, try to extract from other structures
-      if (questionScores.length === 0 && surveyResponse.questionResponses) {
-        Object.entries(surveyResponse.questionResponses).forEach(([questionId, response]) => {
+      if (survey.questionResponses) {
+        Object.entries(survey.questionResponses).forEach(([questionId, response]) => {
           if (response.score !== undefined && response.maxScore !== undefined) {
             const score = parseFloat(response.score) || 0;
             const maxScore = parseFloat(response.maxScore) || 0;
@@ -916,6 +999,34 @@
           }
         });
       }
+      
+      return questionScores;
+    }
+
+    // Extract question scores from questionGroupScores array
+    function extractQuestionScoresFromGroups(questionGroupScores) {
+      const questionScores = [];
+      
+      questionGroupScores.forEach(group => {
+        if (group.questionScores && Array.isArray(group.questionScores)) {
+          group.questionScores.forEach(qScore => {
+            if (qScore.score !== undefined && qScore.maxScore !== undefined) {
+              const score = parseFloat(qScore.score) || 0;
+              const maxScore = parseFloat(qScore.maxScore) || 0;
+              
+              if (maxScore > 0) {
+                questionScores.push({
+                  text: qScore.questionText || qScore.answerText || 'Survey Question',
+                  answerText: qScore.answerText || '',
+                  score: score,
+                  maxScore: maxScore,
+                  percentage: maxScore > 0 ? (score / maxScore) * 100 : 0
+                });
+              }
+            }
+          });
+        }
+      });
       
       return questionScores;
     }
@@ -972,7 +1083,7 @@
         
         <div class="warning-note">
           <strong>Note:</strong> 
-          Showing actual question scores from survey responses (not estimated from aggregates).
+          Data retrieved from Analytics Conversations API. Showing actual question scores from survey responses.
         </div>
         
         <div class="table-container">
@@ -1028,7 +1139,7 @@
                 
                 ${survey.questionScores && survey.questionScores.length > 0 ? 
                   survey.questionScores.map((qScore, qIndex) => {
-                    // Map questions to your standard groups based on question text
+                    // Map questions to standard groups based on question text
                     let groupName = 'General Questions';
                     const questionText = qScore.text || '';
                     
@@ -1068,12 +1179,12 @@
                     <div class="survey-question">
                       <div class="question-text">Is there anything else we could have done to improve your service today?</div>
                       <div><em>Free text response (no score)</em></div>
-                      <div class="muted" style="margin-top: 5px;">Free text responses available in detailed view.</div>
+                      <div class="muted" style="margin-top: 5px;">Check Genesys UI for detailed feedback comments.</div>
                     </div>
                   </div>
                   `
                   : 
-                  '<div class="muted">No question scores available for this survey.</div>'
+                  '<div class="muted">No question scores available for this survey. Check Genesys UI for detailed results.</div>'
                 }
               </div>
             </td>
@@ -1088,7 +1199,7 @@
           </table>
         </div>
         <div class="muted" style="margin-top:10px">
-          Showing ${sortedSurveys.length} survey responses with actual question scores
+          Showing ${sortedSurveys.length} survey responses from Analytics Conversations API
         </div>
       `;
       
