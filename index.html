@@ -567,9 +567,9 @@
             return data;
           }
           
-          // Log complete error details
+          // Log complete error details (CRITICAL FIX: Log the full error)
           const errorText = await response.text();
-          console.error('API Error Details:', {
+          console.error('Full API Error Response:', {
             status: response.status,
             statusText: response.statusText,
             url: url,
@@ -588,12 +588,12 @@
               setTimeout(() => { window.location.href = oauthUrl; }, 2000);
               throw new Error('Authentication required');
             }
-            throw new Error(`HTTP ${response.status}`);
+            throw new Error(`HTTP ${response.status}: ${errorText.substring(0, 200)}`);
           }
           
           attempt++;
           if(attempt > retries){
-            throw new Error(`HTTP ${response.status} after ${retries} retries`);
+            throw new Error(`HTTP ${response.status} after ${retries} retries: ${errorText.substring(0, 200)}`);
           }
           
           const delay = Math.round(baseDelay * (2 ** (attempt - 1)) * (1 + Math.random() * 0.25));
@@ -754,15 +754,14 @@
       }
     }
 
-    // Fetch conversation details using conversations details API
+    // ===== FIXED: fetchConversationDetails function based on Claude's recommendations =====
     async function fetchConversationDetails(start, end, agentIds) {
       const url = `https://api.${config.REGION}/api/v2/analytics/conversations/details/query`;
       
-      // Format dates correctly for the API
       const startISO = start.toISOString();
       const endISO = end.toISOString();
       
-      // Build the request body
+      // Build the base body with correct structure
       const body = {
         "interval": `${startISO}/${endISO}`,
         "order": "desc",
@@ -770,39 +769,53 @@
         "paging": {
           "pageSize": 100,
           "pageNumber": 1
-        },
-        "segmentFilters": [
-          {
-            "type": "and",
-            "predicates": [
-              {
-                "type": "dimension",
-                "dimension": "mediaType",
-                "operator": "matches",
-                "value": "voice"
-              },
-              {
-                "type": "dimension",
-                "dimension": "evaluations",
-                "operator": "exists"
-              }
-            ]
-          }
-        ]
+        }
       };
+      
+      // Build conversation filters for evaluations
+      const conversationFilters = [
+        {
+          "type": "or",
+          "predicates": [
+            {
+              "type": "dimension",
+              "dimension": "evaluationId",
+              "operator": "exists"
+            }
+          ]
+        }
+      ];
+      
+      // Add segment filters for voice media type
+      const segmentFilters = [
+        {
+          "type": "and",
+          "predicates": [
+            {
+              "type": "dimension",
+              "dimension": "mediaType",
+              "operator": "matches",
+              "value": "voice"
+            }
+          ]
+        }
+      ];
       
       // Add agent filter if agents are selected
       if (agentIds && agentIds.length > 0) {
-        body.segmentFilters[0].predicates.push({
+        segmentFilters[0].predicates.push({
           "type": "or",
           "predicates": agentIds.map(agentId => ({
             "type": "dimension",
-            "dimension": "participantId",
+            "dimension": "userId",
             "operator": "matches",
             "value": agentId
           }))
         });
       }
+      
+      body.conversationFilters = conversationFilters;
+      body.segmentFilters = segmentFilters;
       
       console.log('Fetching conversation details with body:', JSON.stringify(body, null, 2));
       
