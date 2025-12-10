@@ -567,7 +567,7 @@
             return data;
           }
           
-          // Log complete error details (CRITICAL FIX: Log the full error)
+          // Log complete error details
           const errorText = await response.text();
           console.error('Full API Error Response:', {
             status: response.status,
@@ -754,68 +754,17 @@
       }
     }
 
-    // ===== FIXED: fetchConversationDetails function based on Claude's recommendations =====
+    // ===== SIMPLIFIED: fetchConversationDetails function - Only interval needed =====
     async function fetchConversationDetails(start, end, agentIds) {
       const url = `https://api.${config.REGION}/api/v2/analytics/conversations/details/query`;
       
       const startISO = start.toISOString();
       const endISO = end.toISOString();
       
-      // Build the base body with correct structure
+      // SIMPLIFIED: Only interval is required for the conversations details API
       const body = {
-        "interval": `${startISO}/${endISO}`,
-        "order": "desc",
-        "orderBy": "conversationStart",
-        "paging": {
-          "pageSize": 100,
-          "pageNumber": 1
-        }
+        "interval": `${startISO}/${endISO}`
       };
-      
-      // Build conversation filters for evaluations
-      const conversationFilters = [
-        {
-          "type": "or",
-          "predicates": [
-            {
-              "type": "dimension",
-              "dimension": "evaluationId",
-              "operator": "exists"
-            }
-          ]
-        }
-      ];
-      
-      // Add segment filters for voice media type
-      const segmentFilters = [
-        {
-          "type": "and",
-          "predicates": [
-            {
-              "type": "dimension",
-              "dimension": "mediaType",
-              "operator": "matches",
-              "value": "voice"
-            }
-          ]
-        }
-      ];
-      
-      // Add agent filter if agents are selected
-      if (agentIds && agentIds.length > 0) {
-        segmentFilters[0].predicates.push({
-          "type": "or",
-          "predicates": agentIds.map(agentId => ({
-            "type": "dimension",
-            "dimension": "userId",
-            "operator": "matches",
-            "value": agentId
-          }))
-        });
-      }
-      
-      body.conversationFilters = conversationFilters;
-      body.segmentFilters = segmentFilters;
       
       console.log('Fetching conversation details with body:', JSON.stringify(body, null, 2));
       
@@ -844,7 +793,15 @@
       
       console.log(`Processing ${conversationData.conversations.length} conversations`);
       
-      conversationData.conversations.forEach((conversation, index) => {
+      // Filter for conversations that have evaluations (surveys)
+      const conversationsWithSurveys = conversationData.conversations.filter(conversation => {
+        const evaluations = conversation.evaluations || [];
+        return evaluations.length > 0 && evaluations.some(eval => eval.formName);
+      });
+      
+      console.log(`Found ${conversationsWithSurveys.length} conversations with surveys`);
+      
+      conversationsWithSurveys.forEach((conversation, index) => {
         const convId = conversation.conversationId;
         const participants = conversation.participants || [];
         
@@ -877,11 +834,6 @@
         // Extract survey evaluations
         const evaluations = conversation.evaluations || [];
         const surveysFromConversation = evaluations.filter(eval => eval.formName);
-        
-        if (surveysFromConversation.length === 0) {
-          // No survey evaluations in this conversation
-          return;
-        }
         
         // Process each survey in the conversation
         surveysFromConversation.forEach(surveyEval => {
