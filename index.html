@@ -655,6 +655,12 @@
           email: u.email || ''
         })).sort((a, b) => a.name.localeCompare(b.name));
         
+        // Create a lookup map for quick user retrieval by ID
+        state.userMap = new Map();
+        state.users.forEach(user => {
+          state.userMap.set(user.id, user);
+        });
+        
         dropdowns.users.setOptions(state.users.map(u => ({
           value: u.id,
           label: `${u.name}${u.email ? ` — ${u.email}` : ''}`
@@ -881,7 +887,7 @@
       }
     }
 
-    // ===== Process Survey Data (UPDATED) =====
+    // ===== Process Survey Data (FIXED for time and agent name) =====
     async function processSurveyData(conversationData, surveyData) {
       const surveys = [];
       
@@ -892,19 +898,43 @@
         conversationData.conversations.forEach(conversation => {
           const convId = conversation.conversationId;
           if (convId) {
-            // Try to find agent in participants
-            let agentName = 'Unknown Agent';
+            // Try to find agent in participants - FIXED AGENT LOOKUP
+            let agentName = null;
             let userId = null;
             
             const participants = conversation.participants || [];
             for (const participant of participants) {
+              // Look for agents or users who participated
               if (participant.purpose === 'agent' || participant.purpose === 'user') {
-                userId = participant.participantId;
-                const agent = state.users.find(u => u.id === userId);
-                if (agent) {
-                  agentName = agent.name;
+                // Try different possible locations for user ID
+                userId = participant.participantId || 
+                         safeGet(participant, 'userId') ||
+                         safeGet(participant, 'user.id');
+                
+                if (userId) {
+                  // Try to find agent in state.users or use participant name
+                  const agent = state.userMap ? state.userMap.get(userId) : state.users.find(u => u.id === userId);
+                  if (agent) {
+                    agentName = agent.name;
+                  } else if (participant.name) {
+                    // Fallback to participant name from conversation details
+                    agentName = participant.name;
+                  }
+                  
+                  // If we found an agent, break
+                  if (agentName) break;
                 }
-                break;
+              }
+            }
+            
+            // If no agent found yet, check other participant types
+            if (!agentName) {
+              for (const participant of participants) {
+                if (participant.name && participant.name.trim()) {
+                  agentName = participant.name;
+                  userId = participant.participantId;
+                  break;
+                }
               }
             }
             
@@ -938,31 +968,51 @@
           // Get conversation details from map
           const conversation = conversationMap.get(convId);
           
-          let conversationDate = new Date();
+          let conversationDate = null;
+          let conversationStart = null;
+          let conversationEnd = null;
           let duration = 0;
           let agentName = 'Unknown Agent';
           
+          // ALWAYS use conversation details if available - NO RANDOM TIMES
           if (conversation) {
-            if (conversation.conversationStart) {
-              conversationDate = new Date(conversation.conversationStart);
-            }
+            conversationStart = conversation.conversationStart;
+            conversationEnd = conversation.conversationEnd;
             duration = conversation.duration || 0;
-            agentName = conversation.agentName || 'Unknown Agent';
-          } else {
-            // Fallback: use agent from state.users
-            const agent = state.users.find(u => u.id === userId);
-            if (agent) {
-              agentName = agent.name;
+            
+            // Use actual conversation start time for date
+            if (conversationStart) {
+              conversationDate = new Date(conversationStart);
             }
             
-            // Fallback to interval date from survey data
+            // Use agent name from conversation details if available
+            if (conversation.agentName) {
+              agentName = conversation.agentName;
+            }
+          }
+          
+          // If still no agent name, try to find agent by userId
+          if (agentName === 'Unknown Agent' && userId) {
+            const agent = state.userMap ? state.userMap.get(userId) : state.users.find(u => u.id === userId);
+            if (agent) {
+              agentName = agent.name;
+            } else {
+              // Last resort: use userId itself
+              agentName = `Agent (${userId.substring(0, 8)}...)`;
+            }
+          }
+          
+          // If no conversation date from conversation details, use survey interval
+          if (!conversationDate) {
             const interval = result.data[0]?.interval;
             if (interval) {
               const dateStr = interval.split('/')[0];
               conversationDate = new Date(dateStr);
-              const hours = 9 + Math.floor(Math.random() * 8);
-              const minutes = Math.floor(Math.random() * 60);
-              conversationDate.setHours(hours, minutes, 0, 0);
+              // Set to middle of the day (12:00) instead of random times
+              conversationDate.setHours(12, 0, 0, 0);
+            } else {
+              // Fallback to current date
+              conversationDate = new Date();
             }
           }
           
@@ -1049,13 +1099,13 @@
             agentName: agentName,
             surveyFormName: formName || 'Unknown Survey',
             conversationDate: conversationDate,
-            conversationStart: conversation?.conversationStart || null,
-            conversationEnd: conversation?.conversationEnd || null,
+            conversationStart: conversationStart,
+            conversationEnd: conversationEnd,
             duration: duration,
             totalScore: totalScore,
             questionScores: questionScores,
             responseCount: responseCount,
-            hasAccurateTime: !!conversation?.conversationStart,
+            hasAccurateTime: !!conversationStart,
             isEstimatedScores: isEstimatedScores,
             freeTextAnswer: freeTextAnswer
           });
@@ -1141,6 +1191,7 @@
       // Calculate statistics
       const totalSurveys = state.surveys.length;
       const surveysWithRealData = state.surveys.filter(s => !s.isEstimatedScores).length;
+      const surveysWithAccurateTime = state.surveys.filter(s => s.hasAccurateTime).length;
       const totalScore = state.surveys.reduce((sum, s) => sum + (s.totalScore || 0), 0);
       const avgScore = totalSurveys > 0 ? totalScore / totalSurveys : 0;
       
@@ -1158,6 +1209,10 @@
             <div class="value">${surveysWithRealData}</div>
             <div class="label">With Real Question Data</div>
           </div>
+          <div class="stat-card">
+            <div class="value">${surveysWithAccurateTime}</div>
+            <div class="label">With Accurate Times</div>
+          </div>
         </div>
         
         ${surveysWithRealData < totalSurveys ? `
@@ -1172,6 +1227,14 @@
           All ${totalSurveys} surveys have real question-level data from the API.
         </div>
         `}
+        
+        ${surveysWithAccurateTime < totalSurveys ? `
+        <div class="info-message">
+          <strong>Time Data:</strong> 
+          ${surveysWithAccurateTime} of ${totalSurveys} surveys have accurate conversation times. 
+          ${totalSurveys - surveysWithAccurateTime} use approximate times from survey intervals.
+        </div>
+        ` : ''}
         
         <div class="table-container">
           <table>
@@ -1197,7 +1260,8 @@
         const score = survey.totalScore || 0;
         const rating = getRatingLabel(score);
         const roundedScore = Math.min(5, Math.max(1, Math.round(score / 20)));
-        const dateTime = formatDateTime(survey.conversationDate);
+        const dateTime = survey.hasAccurateTime ? formatDateTime(survey.conversationDate) : 
+                         `${formatDateOnly(survey.conversationDate)} (approx)`;
         const duration = formatDuration(survey.duration);
         const dataBadge = survey.isEstimatedScores ? 
           '<span class="estimated-data-badge">Estimated</span>' : 
@@ -1228,6 +1292,9 @@
                 <div><strong>Data Source:</strong> ${survey.isEstimatedScores ? 
                   'Estimated question scores (aggregates API)' : 
                   'Real question-level data (survey details API)'}</div>
+                <div><strong>Time Source:</strong> ${survey.hasAccurateTime ? 
+                  'Accurate conversation time' : 
+                  'Approximate time from survey interval'}</div>
                 
                 ${survey.isEstimatedScores ? `
                 <div class="warning-note" style="margin: 15px 0; font-size: 12px;">
