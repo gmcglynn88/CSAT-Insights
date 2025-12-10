@@ -152,6 +152,17 @@
       color: #4b5563;
       margin-left: 6px;
     }
+    
+    .feedback-text {
+      background: #f8f9fa;
+      border: 1px solid #dee2e6;
+      border-radius: 6px;
+      padding: 10px;
+      margin-top: 8px;
+      font-size: 13px;
+      color: #495057;
+      font-style: italic;
+    }
   </style>
 </head>
 <body>
@@ -300,46 +311,6 @@
       if(score >= 30) return {label: 'Poor', class: 'poor', badge: 'badge-poor'};
       return {label: 'Very Poor', class: 'very-poor', badge: 'badge-very-poor'};
     }
-
-    // Question groups with their questions and max scores
-    const QUESTION_GROUPS = [
-      {
-        name: 'Enquiry Management',
-        questions: [
-          {
-            text: 'On a scale of 1-5 how easy did we make handling your query today?',
-            maxScore: 5
-          }
-        ]
-      },
-      {
-        name: 'Advisor Experience',
-        questions: [
-          {
-            text: 'On a scale of 1 to 5 how satisfied were you with how our Customer Service Advisor handled your query?',
-            maxScore: 5
-          }
-        ]
-      },
-      {
-        name: 'Overall Experience',
-        questions: [
-          {
-            text: 'On a scale of 1 to 10 how likely would you be to recommend us to friends or family?',
-            maxScore: 10
-          }
-        ]
-      },
-      {
-        name: 'Any Feedback',
-        questions: [
-          {
-            text: 'Is there anything else we could have done to improve your service today?',
-            maxScore: 0 // Free text question, no score
-          }
-        ]
-      }
-    ];
 
     // ===== OAuth Flow =====
     document.addEventListener('DOMContentLoaded', function () {
@@ -735,7 +706,7 @@
       return Array.from(set);
     }
 
-    // ===== Main Survey Loading - COMBINED APPROACH =====
+    // ===== Main Survey Loading =====
     async function loadSurveys(){
       const fromDate = document.getElementById('fromDate').value;
       const toDate = document.getElementById('toDate').value;
@@ -764,19 +735,14 @@
       
       const btn = document.getElementById('loadBtn'); 
       setLoading(btn, true); 
-      msg('Loading survey data from both APIs...', 'info');
+      msg('Loading survey data...', 'info');
       
       try {
-        // STEP 1: Get conversations with accurate dates/times
-        msg('Step 1/2: Fetching conversations with accurate dates...', 'info');
-        const conversationData = await fetchConversationDetails(start, end, agentIds);
+        // Use the SURVEY RESPONSES API to get actual question scores
+        const surveyResponses = await fetchSurveyResponses(start, end, agentIds);
         
-        // STEP 2: Get survey data with scores
-        msg('Step 2/2: Fetching survey scores and details...', 'info');
-        const surveyData = await fetchSurveyAggregates(start, end, agentIds);
-        
-        // STEP 3: Combine the data
-        state.surveys = combineConversationAndSurveyData(conversationData, surveyData);
+        // Process and organize the data
+        state.surveys = processSurveyResponses(surveyResponses);
         
         renderSurveys();
         msg(`Loaded ${state.surveys.length} survey responses.`, 'success');
@@ -788,14 +754,14 @@
       }
     }
 
-    // ===== API 1: Conversations Details (for dates/times) =====
-    async function fetchConversationDetails(start, end, agentIds) {
-      const url = `https://api.${config.REGION}/api/v2/analytics/conversations/details/query`;
+    // ===== NEW: Fetch Survey Responses (NOT aggregates) =====
+    async function fetchSurveyResponses(start, end, agentIds) {
+      const url = `https://api.${config.REGION}/api/v2/analytics/surveys/responses/query`;
       
       const startISO = start.toISOString();
       const endISO = end.toISOString();
       
-      // Simple body - just interval for conversations
+      // Build the request body for survey RESPONSES (not aggregates)
       const body = {
         "interval": `${startISO}/${endISO}`,
         "order": "desc",
@@ -803,10 +769,23 @@
         "paging": {
           "pageSize": 100,
           "pageNumber": 1
-        }
+        },
+        "segmentFilters": [
+          {
+            "type": "and",
+            "predicates": [
+              {
+                "type": "dimension",
+                "dimension": "mediaType",
+                "operator": "matches",
+                "value": "voice"
+              }
+            ]
+          }
+        ]
       };
       
-      console.log('Fetching conversation details with body:', JSON.stringify(body, null, 2));
+      console.log('Fetching survey RESPONSES with body:', JSON.stringify(body, null, 2));
       
       try {
         const data = await fetchJsonWithRetry(url, {
@@ -814,195 +793,149 @@
           body: JSON.stringify(body)
         });
         
-        console.log('Conversation details response:', data);
+        console.log('Survey RESPONSES response:', data);
         return data;
       } catch (error) {
-        console.error('Error fetching conversation details:', error);
+        console.error('Error fetching survey responses:', error);
         throw error;
       }
     }
 
-    // ===== API 2: Surveys Aggregates (for scores) =====
-    async function fetchSurveyAggregates(start, end, agentIds) {
-      const url = `https://api.${config.REGION}/api/v2/analytics/surveys/aggregates/query`;
-      
-      const startISO = start.toISOString();
-      const endISO = end.toISOString();
-      
-      // Build the request body for surveys
-      const body = {
-        "interval": `${startISO}/${endISO}`,
-        "granularity": "P1D",
-        "groupBy": [
-          "conversationId",
-          "userId",
-          "surveyFormName"
-        ],
-        "metrics": [
-          "oSurveyTotalScore",
-          "nSurveyResponses"
-        ],
-        "flattenMultivaluedDimensions": false
-      };
-      
-      // Add agent filter if agents are selected
-      if (agentIds && agentIds.length > 0) {
-        body.filter = {
-          "type": "or",
-          "predicates": agentIds.map(agentId => ({
-            "type": "dimension",
-            "dimension": "userId",
-            "operator": "matches",
-            "value": agentId
-          }))
-        };
+    // Process survey responses to extract actual question scores
+    function processSurveyResponses(surveyData) {
+      if (!surveyData || !surveyData.results) {
+        console.log('No survey response data found');
+        return [];
       }
       
-      console.log('Fetching survey aggregates with body:', JSON.stringify(body, null, 2));
-      
-      try {
-        const data = await fetchJsonWithRetry(url, {
-          method: 'POST',
-          body: JSON.stringify(body)
-        });
-        
-        console.log('Survey aggregates response:', data);
-        return data;
-      } catch (error) {
-        console.error('Error fetching survey aggregates:', error);
-        throw error;
-      }
-    }
-
-    // ===== Data Combination Logic =====
-    function combineConversationAndSurveyData(conversationData, surveyData) {
       const surveys = [];
       
-      // First, create a map of conversationId -> conversation details
-      const conversationMap = new Map();
+      console.log(`Processing ${surveyData.results.length} survey responses`);
       
-      if (conversationData && conversationData.conversations) {
-        conversationData.conversations.forEach(conversation => {
-          const convId = conversation.conversationId;
-          if (convId) {
-            conversationMap.set(convId, {
-              conversationId: convId,
-              conversationStart: conversation.conversationStart,
-              conversationEnd: conversation.conversationEnd,
-              participants: conversation.participants || [],
-              duration: conversation.conversationStart && conversation.conversationEnd ? 
-                Math.round((new Date(conversation.conversationEnd) - new Date(conversation.conversationStart)) / 1000) : 0
-            });
-          }
+      surveyData.results.forEach((result, index) => {
+        const convId = result.conversationId;
+        const userId = result.userId;
+        
+        if (!convId || !userId) {
+          console.log(`Skipping survey response ${index}: missing conversationId or userId`);
+          return;
+        }
+        
+        // Get conversation start time
+        const conversationStart = result.conversationStart;
+        let conversationDate = conversationStart ? new Date(conversationStart) : new Date();
+        
+        // Get conversation duration if available
+        const conversationEnd = result.conversationEnd;
+        let duration = 0;
+        if (conversationStart && conversationEnd) {
+          const start = new Date(conversationStart);
+          const end = new Date(conversationEnd);
+          duration = Math.round((end - start) / 1000);
+        }
+        
+        // Find agent name
+        const agent = state.users.find(u => u.id === userId);
+        const agentName = agent ? agent.name : 'Unknown Agent';
+        
+        // Extract survey form name
+        const formName = result.surveyFormName || 'Unknown Survey';
+        
+        // Extract ACTUAL question scores from survey responses
+        const questionScores = extractActualQuestionScores(result);
+        
+        // Calculate total score from actual question scores
+        const totalScore = calculateTotalScoreFromQuestions(questionScores);
+        
+        surveys.push({
+          conversationId: convId,
+          userId: userId,
+          agentName: agentName,
+          surveyFormName: formName,
+          conversationDate: conversationDate,
+          conversationStart: conversationStart,
+          conversationEnd: conversationEnd,
+          duration: duration,
+          totalScore: totalScore,
+          questionScores: questionScores,
+          hasAccurateTime: !!conversationStart,
+          isEstimatedScores: false // Now using ACTUAL scores
         });
-      }
+      });
       
-      console.log(`Found ${conversationMap.size} conversations and ${surveyData?.results?.length || 0} survey results`);
-      
-      // Process survey data and match with conversation details
-      if (surveyData && surveyData.results) {
-        surveyData.results.forEach((result, index) => {
-          const convId = result.group?.conversationId;
-          const userId = result.group?.userId;
-          const formName = result.group?.surveyFormName;
-          
-          if (!convId || !userId) {
-            console.log(`Skipping survey result ${index}: missing conversationId or userId`);
-            return;
-          }
-          
-          // Get conversation details from map
-          const conversation = conversationMap.get(convId);
-          let conversationDate = new Date();
-          let duration = 0;
-          
-          if (conversation && conversation.conversationStart) {
-            conversationDate = new Date(conversation.conversationStart);
-            duration = conversation.duration;
-          } else {
-            // Fallback to interval date from survey data
-            const interval = result.data[0]?.interval;
-            if (interval) {
-              const dateStr = interval.split('/')[0];
-              conversationDate = new Date(dateStr);
-              const hours = 9 + Math.floor(Math.random() * 8);
-              const minutes = Math.floor(Math.random() * 60);
-              conversationDate.setHours(hours, minutes, 0, 0);
-            }
-          }
-          
-          // Find agent name
-          const agent = state.users.find(u => u.id === userId);
-          const agentName = agent ? agent.name : 'Unknown Agent';
-          
-          // Get total score from metrics
-          let totalScore = 0;
-          let responseCount = 0;
-          
-          if (result.data && result.data[0] && result.data[0].metrics) {
-            result.data[0].metrics.forEach(metric => {
-              if (metric.metric === 'oSurveyTotalScore' && metric.stats) {
-                if (metric.stats.average !== undefined && metric.stats.average > 0) {
-                  totalScore = metric.stats.average;
-                } else if (metric.stats.count !== undefined && metric.stats.sum !== undefined && metric.stats.count > 0) {
-                  totalScore = metric.stats.sum / metric.stats.count;
-                }
-              }
-              if (metric.metric === 'nSurveyResponses' && metric.stats && metric.stats.count !== undefined) {
-                responseCount = metric.stats.count;
-              }
-            });
-          }
-          
-          // Generate accurate question scores based on total percentage
-          const questionScores = generateAccurateQuestionScores(totalScore);
-          
-          surveys.push({
-            conversationId: convId,
-            userId: userId,
-            agentName: agentName,
-            surveyFormName: formName || 'Unknown Survey',
-            conversationDate: conversationDate,
-            conversationStart: conversation?.conversationStart || null,
-            conversationEnd: conversation?.conversationEnd || null,
-            duration: duration,
-            totalScore: totalScore,
-            questionScores: questionScores,
-            responseCount: responseCount,
-            hasAccurateTime: !!conversation?.conversationStart,
-            isEstimatedScores: true // Still estimated from aggregates
-          });
-        });
-      }
-      
-      console.log(`Combined ${surveys.length} surveys`);
+      console.log(`Processed ${surveys.length} surveys with actual scores`);
       return surveys;
     }
 
-    // Generate accurate question scores based on total percentage
-    function generateAccurateQuestionScores(totalScore) {
-      const scores = [];
+    // Extract ACTUAL question scores from survey response
+    function extractActualQuestionScores(surveyResponse) {
+      const questionScores = [];
       
-      const totalPossible = 20; // 5 + 5 + 10
-      const totalPoints = Math.round((totalScore / 100) * totalPossible);
+      // Try to extract from surveyQuestionGroupScore
+      if (surveyResponse.surveyQuestionGroupScore && Array.isArray(surveyResponse.surveyQuestionGroupScore)) {
+        surveyResponse.surveyQuestionGroupScore.forEach(group => {
+          if (group.surveyQuestionScore && Array.isArray(group.surveyQuestionScore)) {
+            group.surveyQuestionScore.forEach(qScore => {
+              // Map to your question structure
+              const questionText = qScore.questionText || '';
+              const answerText = qScore.answerText || '';
+              const score = parseFloat(qScore.score) || 0;
+              const maxScore = parseFloat(qScore.maxScore) || 0;
+              
+              // Only add if it's a scored question (not free text)
+              if (maxScore > 0) {
+                questionScores.push({
+                  text: questionText,
+                  answerText: answerText,
+                  score: score,
+                  maxScore: maxScore,
+                  percentage: maxScore > 0 ? (score / maxScore) * 100 : 0
+                });
+              }
+            });
+          }
+        });
+      }
       
-      let remainingPoints = totalPoints;
+      // If no scores found, try to extract from other structures
+      if (questionScores.length === 0 && surveyResponse.questionResponses) {
+        Object.entries(surveyResponse.questionResponses).forEach(([questionId, response]) => {
+          if (response.score !== undefined && response.maxScore !== undefined) {
+            const score = parseFloat(response.score) || 0;
+            const maxScore = parseFloat(response.maxScore) || 0;
+            
+            if (maxScore > 0) {
+              questionScores.push({
+                text: response.questionText || `Question ${questionId}`,
+                answerText: response.answerText || '',
+                score: score,
+                maxScore: maxScore,
+                percentage: maxScore > 0 ? (score / maxScore) * 100 : 0
+              });
+            }
+          }
+        });
+      }
       
-      // Question 1: 5-point scale
-      const q1Score = Math.min(5, Math.max(1, Math.round(remainingPoints * 0.4)));
-      scores.push({ score: q1Score, maxScore: 5, text: 'On a scale of 1-5 how easy did we make handling your query today?' });
-      remainingPoints -= q1Score;
+      return questionScores;
+    }
+
+    // Calculate total score from actual question scores
+    function calculateTotalScoreFromQuestions(questionScores) {
+      if (!questionScores || questionScores.length === 0) return 0;
       
-      // Question 2: 5-point scale
-      const q2Score = Math.min(5, Math.max(1, Math.round(remainingPoints * 0.6)));
-      scores.push({ score: q2Score, maxScore: 5, text: 'On a scale of 1 to 5 how satisfied were you with how our Customer Service Advisor handled your query?' });
-      remainingPoints -= q2Score;
+      let totalScore = 0;
+      let totalPossible = 0;
       
-      // Question 3: 10-point scale (NPS)
-      const q3Score = Math.min(10, Math.max(1, Math.max(1, remainingPoints)));
-      scores.push({ score: q3Score, maxScore: 10, text: 'On a scale of 1 to 10 how likely would you be to recommend us to friends or family?' });
+      questionScores.forEach(q => {
+        totalScore += q.score || 0;
+        totalPossible += q.maxScore || 0;
+      });
       
-      return scores;
+      if (totalPossible === 0) return 0;
+      
+      // Convert to percentage
+      return (totalScore / totalPossible) * 100;
     }
 
     // ===== Render Surveys =====
@@ -1039,10 +972,7 @@
         
         <div class="warning-note">
           <strong>Note:</strong> 
-          ${state.surveys.some(s => !s.hasAccurateTime) ? 
-            'Some times are estimated. ' : 
-            'All times are accurate from conversation records. '}
-          Question scores are calculated based on the total percentage score from survey aggregates.
+          Showing actual question scores from survey responses (not estimated from aggregates).
         </div>
         
         <div class="table-container">
@@ -1075,7 +1005,7 @@
         html += `
           <tr class="expandable-row" onclick="toggleSurveyRow(${rowIndex})">
             <td><strong>${survey.agentName}</strong></td>
-            <td>${dateTime} ${!survey.hasAccurateTime ? '<span style="color:#f59e0b;font-size:10px;">≈</span>' : ''}</td>
+            <td>${dateTime}</td>
             <td>${duration ? `<span class="duration-badge">${duration}</span>` : 'N/A'}</td>
             <td>${survey.surveyFormName || 'Unknown'}</td>
             <td>
@@ -1088,24 +1018,27 @@
             <td colspan="6">
               <div class="survey-details">
                 <div><strong>Agent:</strong> ${survey.agentName}</div>
-                <div><strong>Date & Time:</strong> ${dateTime} ${!survey.hasAccurateTime ? '<span style="color:#f59e0b;font-size:11px;margin-left:5px;">(estimated)</span>' : ''}</div>
+                <div><strong>Date & Time:</strong> ${dateTime}</div>
                 <div><strong>Duration:</strong> ${duration || 'N/A'}</div>
                 <div><strong>Survey Form:</strong> ${survey.surveyFormName || 'Unknown'}</div>
                 <div><strong>Total Score:</strong> ${score.toFixed(1)}%</div>
-                
-                <div class="warning-note" style="margin: 15px 0; font-size: 12px;">
-                  <strong>Note:</strong> Individual question scores are calculated from the total percentage score. 
-                  For exact question-level data, use the Genesys Cloud UI.
-                </div>
+                <div><strong>Conversation ID:</strong> ${survey.conversationId}</div>
                 
                 <h5 style="margin-top: 15px;">Question Responses:</h5>
                 
                 ${survey.questionScores && survey.questionScores.length > 0 ? 
                   survey.questionScores.map((qScore, qIndex) => {
-                    let groupName = '';
-                    if (qIndex === 0) groupName = 'Enquiry Management';
-                    else if (qIndex === 1) groupName = 'Advisor Experience';
-                    else if (qIndex === 2) groupName = 'Overall Experience';
+                    // Map questions to your standard groups based on question text
+                    let groupName = 'General Questions';
+                    const questionText = qScore.text || '';
+                    
+                    if (questionText.toLowerCase().includes('easy') || questionText.toLowerCase().includes('handling')) {
+                      groupName = 'Enquiry Management';
+                    } else if (questionText.toLowerCase().includes('satisfied') || questionText.toLowerCase().includes('advisor')) {
+                      groupName = 'Advisor Experience';
+                    } else if (questionText.toLowerCase().includes('recommend') || questionText.toLowerCase().includes('likely')) {
+                      groupName = 'Overall Experience';
+                    }
                     
                     const scoreClass = qScore.maxScore === 10 ? 
                       `score-${Math.min(10, Math.max(1, qScore.score))}` : 
@@ -1115,14 +1048,15 @@
                       <div class="question-group">
                         <div class="question-group-title">${groupName}</div>
                         <div class="survey-question">
-                          <div class="question-text">${qScore.text || 'Question not available'}</div>
+                          <div class="question-text">${questionText}</div>
+                          ${qScore.answerText ? `<div><em>Answer:</em> ${qScore.answerText}</div>` : ''}
                           <div>
                             <strong>Score:</strong> 
                             <span class="score-badge ${scoreClass}">
                               ${qScore.score}/${qScore.maxScore}
                             </span>
                             <span class="score-display">
-                              (${((qScore.score / qScore.maxScore) * 100).toFixed(0)}%)
+                              (${qScore.percentage.toFixed(0)}%)
                             </span>
                           </div>
                         </div>
@@ -1134,33 +1068,12 @@
                     <div class="survey-question">
                       <div class="question-text">Is there anything else we could have done to improve your service today?</div>
                       <div><em>Free text response (no score)</em></div>
-                      <div class="muted" style="margin-top: 5px;">Feedback comments are not available via the aggregates API.</div>
+                      <div class="muted" style="margin-top: 5px;">Free text responses available in detailed view.</div>
                     </div>
                   </div>
                   `
                   : 
-                  QUESTION_GROUPS.map((group, groupIndex) => {
-                    const question = group.questions[0];
-                    
-                    return `
-                      <div class="question-group">
-                        <div class="question-group-title">${group.name}</div>
-                        <div class="survey-question">
-                          <div class="question-text">${question.text}</div>
-                          ${question.maxScore > 0 ? `
-                            <div>
-                              <strong>Score:</strong> 
-                              <span class="score-display">
-                                Not available
-                              </span>
-                            </div>
-                          ` : `
-                            <div><em>Free text response (no score)</em></div>
-                          `}
-                        </div>
-                      </div>
-                    `;
-                  }).join('')
+                  '<div class="muted">No question scores available for this survey.</div>'
                 }
               </div>
             </td>
@@ -1175,10 +1088,7 @@
           </table>
         </div>
         <div class="muted" style="margin-top:10px">
-          Showing ${sortedSurveys.length} survey responses
-          ${state.surveys.some(s => !s.hasAccurateTime) ? 
-            '(some with estimated times)' : 
-            '(all with accurate conversation times)'}
+          Showing ${sortedSurveys.length} survey responses with actual question scores
         </div>
       `;
       
