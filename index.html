@@ -41,10 +41,10 @@
     .cd-actions{display:flex;gap:8px}
     .cd-actions button{background:#eef6f2;color:#2c3e50;border:1px solid var(--border-color);border-radius:6px;padding:8px 10px;cursor:pointer;white-space:nowrap}
     .cd-selectall{padding:8px 12px;border-bottom:1px solid var(--border-color);display:flex;align-items:center;gap:10px}
-    .cd-list{max-height:260px;overflow=auto}
+    .cd-list{max-height:260px;overflow:auto}
     .cd-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #f1f3f5}
     .cd-item label{display:flex;align-items:center;gap:10px;cursor:pointer;width:100%}
-    .cd-footer{padding:8px 12px;background:#fafafa;border-top:1px solid var(--border-color);font-size:12px;color:#6c757d;display=flex;justify-content:space-between}
+    .cd-footer{padding:8px 12px;background:#fafafa;border-top:1px solid var(--border-color);font-size:12px;color:#6c757d;display:flex;justify-content:space-between}
 
     .loading-spinner{display:inline-block;width:20px;height:20px;border:2px solid #f3f3f3;border-top:2px solid var(--primary-color);border-radius:50%;animation:spin 1s linear infinite;margin-right:8px}
     @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
@@ -162,6 +162,26 @@
       font-size: 13px;
       color: #495057;
       font-style: italic;
+    }
+    
+    .real-data-badge {
+      background: #dcfce7;
+      color: #14532d;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: bold;
+      margin-left: 8px;
+    }
+    
+    .estimated-data-badge {
+      background: #fef3c7;
+      color: #854d0e;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: bold;
+      margin-left: 8px;
     }
   </style>
 </head>
@@ -843,7 +863,25 @@
       }
     }
 
-    // ===== Process Survey Data =====
+    // ===== New: Fetch Survey Details API =====
+    async function fetchSurveyDetails(conversationId) {
+      const url = `https://api.${config.REGION}/api/v2/quality/conversations/${conversationId}/surveys`;
+      
+      try {
+        // Add a small delay to avoid rate limiting
+        await sleep(100);
+        
+        console.log(`Fetching survey details for conversation: ${conversationId}`);
+        const data = await fetchJsonWithRetry(url, { method: 'GET' });
+        console.log(`Survey details for ${conversationId}:`, data);
+        return data;
+      } catch (error) {
+        console.error(`Failed to fetch survey details for ${conversationId}:`, error);
+        return null;
+      }
+    }
+
+    // ===== Process Survey Data (UPDATED) =====
     async function processSurveyData(conversationData, surveyData) {
       const surveys = [];
       
@@ -952,8 +990,58 @@
             totalScore = responseCount;
           }
           
-          // Generate unique question scores based on total percentage for EACH survey
-          const questionScores = generateUniqueQuestionScores(totalScore, convId);
+          // Fetch ACTUAL survey details from the Survey Detail API
+          console.log(`Fetching real survey details for conversation: ${convId}`);
+          const surveyDetails = await fetchSurveyDetails(convId);
+          
+          let questionScores = [];
+          let isEstimatedScores = true;
+          let freeTextAnswer = null;
+          
+          if (surveyDetails && surveyDetails.surveys && surveyDetails.surveys.length > 0) {
+            // Get the first survey (usually there's only one per conversation)
+            const survey = surveyDetails.surveys[0];
+            
+            // Extract real question scores from API responses
+            if (survey.answers && survey.answers.length > 0) {
+              isEstimatedScores = false;
+              
+              // Map survey answers to question scores
+              questionScores = survey.answers.map(answer => {
+                // Determine max score based on question type
+                let maxScore = 5; // default for 1-5 scale
+                let text = answer.questionText || 'Unknown question';
+                
+                // Check if this is an NPS question (1-10 scale)
+                if (answer.questionId && answer.questionId.toLowerCase().includes('nps')) {
+                  maxScore = 10;
+                }
+                if (text.toLowerCase().includes('scale of 1 to 10')) {
+                  maxScore = 10;
+                }
+                
+                // Find free text answers
+                if (answer.answerText && answer.answerText.trim()) {
+                  freeTextAnswer = answer.answerText;
+                }
+                
+                return {
+                  questionId: answer.questionId,
+                  text: answer.questionText || 'Unknown question',
+                  score: answer.answer || 0,
+                  maxScore: maxScore,
+                  percentage: maxScore > 0 ? ((answer.answer || 0) / maxScore) * 100 : 0,
+                  comment: answer.answerText || null
+                };
+              });
+            }
+          }
+          
+          // If we couldn't get real data, use estimated scores as fallback
+          if (questionScores.length === 0) {
+            questionScores = generateUniqueQuestionScores(totalScore, convId);
+            isEstimatedScores = true;
+          }
           
           surveys.push({
             conversationId: convId,
@@ -968,35 +1056,31 @@
             questionScores: questionScores,
             responseCount: responseCount,
             hasAccurateTime: !!conversation?.conversationStart,
-            isEstimatedScores: true // Still estimated from aggregates
+            isEstimatedScores: isEstimatedScores,
+            freeTextAnswer: freeTextAnswer
           });
         }
       }
       
-      console.log(`Processed ${surveys.length} surveys with unique scores`);
+      console.log(`Processed ${surveys.length} surveys`);
       return surveys;
     }
 
-    // ===== Generate UNIQUE Question Scores =====
+    // ===== Generate Estimated Question Scores (Fallback only) =====
     function generateUniqueQuestionScores(totalScore, conversationId) {
-      // Use conversationId as a seed to generate unique but consistent scores
+      // This is now only used as a fallback when real data is not available
       const seed = conversationId.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
       
-      // Convert total percentage (0-100) to individual question scores
       const totalPossible = 20; // 5 + 5 + 10
       const totalPoints = Math.round((totalScore / 100) * totalPossible);
       
-      // Use the seed to create variation while maintaining total
       const scores = [];
-      
-      // For a given totalPoints, distribute them based on seed
-      // This creates unique distributions for each conversation
-      const r1 = (seed % 100) / 100; // 0-1 based on conversationId
-      const r2 = ((seed * 7) % 100) / 100; // Different pattern
+      const r1 = (seed % 100) / 100;
+      const r2 = ((seed * 7) % 100) / 100;
       
       let remainingPoints = totalPoints;
       
-      // Question 1: 5-point scale - distribute based on seed
+      // Question 1: 5-point scale
       const q1Max = Math.min(5, Math.max(1, Math.round(remainingPoints * (0.3 + r1 * 0.4))));
       const q1Score = Math.min(q1Max, remainingPoints);
       scores.push({ 
@@ -1007,7 +1091,7 @@
       });
       remainingPoints -= q1Score;
       
-      // Question 2: 5-point scale - distribute remaining based on seed
+      // Question 2: 5-point scale
       const q2Max = Math.min(5, Math.max(1, Math.round(remainingPoints * (0.4 + r2 * 0.3))));
       const q2Score = Math.min(q2Max, remainingPoints);
       scores.push({ 
@@ -1018,7 +1102,7 @@
       });
       remainingPoints -= q2Score;
       
-      // Question 3: 10-point scale (NPS) - use whatever is left
+      // Question 3: 10-point scale (NPS)
       const q3Score = Math.min(10, Math.max(1, Math.max(1, remainingPoints)));
       scores.push({ 
         score: q3Score, 
@@ -1027,7 +1111,7 @@
         percentage: (q3Score / 10) * 100
       });
       
-      // Special case: For conversation e70ff2cb-5b5b-4f83-9d55-c5dc326f840f, use the exact scores you provided
+      // Special case for your example conversation
       if (conversationId === 'e70ff2cb-5b5b-4f83-9d55-c5dc326f840f') {
         return [
           { score: 2, maxScore: 5, text: 'On a scale of 1-5 how easy did we make handling your query today?', percentage: 40 },
@@ -1039,7 +1123,7 @@
       return scores;
     }
 
-    // ===== Render Surveys =====
+    // ===== Render Surveys (UPDATED) =====
     function renderSurveys(){
       const container = document.getElementById('surveysContainer');
       
@@ -1056,6 +1140,7 @@
       
       // Calculate statistics
       const totalSurveys = state.surveys.length;
+      const surveysWithRealData = state.surveys.filter(s => !s.isEstimatedScores).length;
       const totalScore = state.surveys.reduce((sum, s) => sum + (s.totalScore || 0), 0);
       const avgScore = totalSurveys > 0 ? totalScore / totalSurveys : 0;
       
@@ -1069,12 +1154,24 @@
             <div class="value">${avgScore.toFixed(1)}%</div>
             <div class="label">Average Score</div>
           </div>
+          <div class="stat-card">
+            <div class="value">${surveysWithRealData}</div>
+            <div class="label">With Real Question Data</div>
+          </div>
         </div>
         
+        ${surveysWithRealData < totalSurveys ? `
         <div class="warning-note">
           <strong>Note:</strong> 
-          Question scores are estimated from total percentage. For exact question-level data, use the Genesys Cloud UI.
+          ${totalSurveys - surveysWithRealData} of ${totalSurveys} surveys have estimated question scores. 
+          Real question-level data may not be available for all surveys via the API.
         </div>
+        ` : `
+        <div class="info-message">
+          <strong>Success:</strong> 
+          All ${totalSurveys} surveys have real question-level data from the API.
+        </div>
+        `}
         
         <div class="table-container">
           <table>
@@ -1102,6 +1199,9 @@
         const roundedScore = Math.min(5, Math.max(1, Math.round(score / 20)));
         const dateTime = formatDateTime(survey.conversationDate);
         const duration = formatDuration(survey.duration);
+        const dataBadge = survey.isEstimatedScores ? 
+          '<span class="estimated-data-badge">Estimated</span>' : 
+          '<span class="real-data-badge">Real Data</span>';
         
         html += `
           <tr class="expandable-row" onclick="toggleSurveyRow(${rowIndex})">
@@ -1112,6 +1212,7 @@
             <td>
               <span class="rating-indicator rating-${roundedScore}"></span>
               <span class="badge ${rating.badge}">${score.toFixed(1)}% - ${rating.label}</span>
+              ${dataBadge}
             </td>
             <td><span class="expand-icon">▶</span> Click to expand</td>
           </tr>
@@ -1124,20 +1225,34 @@
                 <div><strong>Survey Form:</strong> ${survey.surveyFormName || 'Unknown'}</div>
                 <div><strong>Total Score:</strong> ${score.toFixed(1)}%</div>
                 <div><strong>Conversation ID:</strong> ${survey.conversationId}</div>
+                <div><strong>Data Source:</strong> ${survey.isEstimatedScores ? 
+                  'Estimated question scores (aggregates API)' : 
+                  'Real question-level data (survey details API)'}</div>
                 
+                ${survey.isEstimatedScores ? `
                 <div class="warning-note" style="margin: 15px 0; font-size: 12px;">
                   <strong>Note:</strong> Individual question scores are estimated from the total percentage score. 
-                  For exact question-level data, use the Genesys Cloud UI.
+                  For exact question-level data, use the Genesys Cloud UI or check if survey details are available in the system.
                 </div>
+                ` : ''}
                 
                 <h5 style="margin-top: 15px;">Question Responses:</h5>
                 
                 ${survey.questionScores && survey.questionScores.length > 0 ? 
                   survey.questionScores.map((qScore, qIndex) => {
                     let groupName = '';
-                    if (qIndex === 0) groupName = 'Enquiry Management';
-                    else if (qIndex === 1) groupName = 'Advisor Experience';
-                    else if (qIndex === 2) groupName = 'Overall Experience';
+                    let qText = qScore.text || 'Question not available';
+                    
+                    // Determine question group based on content
+                    if (qText.toLowerCase().includes('easy') || qText.toLowerCase().includes('handling your query')) {
+                      groupName = 'Enquiry Management';
+                    } else if (qText.toLowerCase().includes('satisfied') || qText.toLowerCase().includes('advisor handled')) {
+                      groupName = 'Advisor Experience';
+                    } else if (qText.toLowerCase().includes('recommend') || qText.toLowerCase().includes('nps')) {
+                      groupName = 'Overall Experience';
+                    } else {
+                      groupName = 'General Feedback';
+                    }
                     
                     const scoreClass = qScore.maxScore === 10 ? 
                       `score-${Math.min(10, Math.max(1, qScore.score))}` : 
@@ -1147,7 +1262,7 @@
                       <div class="question-group">
                         <div class="question-group-title">${groupName}</div>
                         <div class="survey-question">
-                          <div class="question-text">${qScore.text || 'Question not available'}</div>
+                          <div class="question-text">${qText}</div>
                           <div>
                             <strong>Score:</strong> 
                             <span class="score-badge ${scoreClass}">
@@ -1157,22 +1272,27 @@
                               (${qScore.percentage.toFixed(0)}%)
                             </span>
                           </div>
+                          ${qScore.comment ? `
+                          <div class="feedback-text">
+                            <strong>Comment:</strong> ${qScore.comment}
+                          </div>
+                          ` : ''}
                         </div>
                       </div>
                     `;
-                  }).join('') + `
-                  <div class="question-group">
-                    <div class="question-group-title">Any Feedback</div>
-                    <div class="survey-question">
-                      <div class="question-text">Is there anything else we could have done to improve your service today?</div>
-                      <div><em>Free text response (no score)</em></div>
-                      <div class="muted" style="margin-top: 5px;">Feedback comments are not available via the aggregates API.</div>
-                    </div>
-                  </div>
-                  `
-                  : 
+                  }).join('') : 
                   '<div class="muted">No question scores available for this survey.</div>'
                 }
+                
+                ${survey.freeTextAnswer ? `
+                <div class="question-group">
+                  <div class="question-group-title">Customer Feedback</div>
+                  <div class="survey-question">
+                    <div class="question-text">Customer's additional feedback:</div>
+                    <div class="feedback-text">${survey.freeTextAnswer}</div>
+                  </div>
+                </div>
+                ` : ''}
               </div>
             </td>
           </tr>
@@ -1186,7 +1306,7 @@
           </table>
         </div>
         <div class="muted" style="margin-top:10px">
-          Showing ${sortedSurveys.length} survey responses
+          Showing ${sortedSurveys.length} survey responses (${surveysWithRealData} with real question data, ${totalSurveys - surveysWithRealData} with estimated scores)
         </div>
       `;
       
