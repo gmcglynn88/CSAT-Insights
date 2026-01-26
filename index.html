@@ -498,8 +498,11 @@
               <span class="calendar-icon">📅</span>
             </div>
           </div>
-          <input type="hidden" id="fromDate">
-          <input type="hidden" id="toDate">
+          <!-- Keeping the original date inputs but making them visible for debugging -->
+          <div style="display: none;">
+            <input type="date" id="fromDate">
+            <input type="date" id="toDate">
+          </div>
         </div>
         <div>
           <label>&nbsp;</label>
@@ -701,11 +704,23 @@
     
     function updateHiddenDateInputs() {
       if (dateRangeState.startDate) {
-        document.getElementById('fromDate').value = dateRangeState.startDate.toISOString().split('T')[0];
+        document.getElementById('fromDate').value = formatDateForInput(dateRangeState.startDate);
       }
       if (dateRangeState.endDate) {
-        document.getElementById('toDate').value = dateRangeState.endDate.toISOString().split('T')[0];
+        document.getElementById('toDate').value = formatDateForInput(dateRangeState.endDate);
       }
+      console.log('Hidden inputs updated:', {
+        fromDate: document.getElementById('fromDate').value,
+        toDate: document.getElementById('toDate').value
+      });
+    }
+    
+    function formatDateForInput(date) {
+      // Format as YYYY-MM-DD for input[type="date"]
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
     }
     
     function updateDateRangeDisplay() {
@@ -979,6 +994,12 @@
         if (dateRangeState.startDate && dateRangeState.endDate) {
           updateDateRangeDisplay();
           updateHiddenDateInputs();
+          console.log('Calendar applied:', {
+            start: dateRangeState.startDate,
+            end: dateRangeState.endDate,
+            fromInput: document.getElementById('fromDate').value,
+            toInput: document.getElementById('toDate').value
+          });
           closeCalendar();
         } else {
           alert('Please select a date range first.');
@@ -1029,6 +1050,7 @@
           }
           
           updateDateRangeDisplay();
+          updateHiddenDateInputs();
           updateSelectedRangeDisplay();
           updateCalendar();
         });
@@ -1426,6 +1448,8 @@
       const fromDate = document.getElementById('fromDate').value;
       const toDate = document.getElementById('toDate').value;
       
+      console.log('Loading surveys with dates:', { fromDate, toDate });
+      
       if(!fromDate || !toDate){
         msg('Please select both From and To dates.', 'error');
         return;
@@ -1435,6 +1459,8 @@
       const start = new Date(fromDate + 'T00:00:00');
       const end = new Date(toDate + 'T23:59:59');
       const diffDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+      
+      console.log('Date validation:', { start, end, diffDays });
       
       if (diffDays > 90) {
         msg('Date range cannot exceed 90 days. Please select a smaller range.', 'error');
@@ -1473,12 +1499,11 @@
     async function fetchConversationsAndSurveys(start, end, agentIds) {
       const url = `https://api.${config.REGION}/api/v2/analytics/conversations/details/query`;
       
-      // Format dates for API - FIXED to match your other app's format
-      // Ensure proper ISO 8601 format with timezone
+      // Format dates for API - using the same logic as your original working version
       const startISO = start.toISOString();
       const endISO = end.toISOString();
       
-      // Build conversation query to get conversation details - FIXED to match your other app
+      // Build conversation query - using the EXACT same structure as your original working version
       const body = {
         "interval": `${startISO}/${endISO}`,
         "order": "desc",
@@ -1487,33 +1512,32 @@
           "pageSize": 50,
           "pageNumber": 1
         },
-        "segmentFilters": [],
+        "segmentFilters": [
+          {
+            "type": "or",
+            "predicates": [
+              {
+                "dimension": "mediaType",
+                "value": "voice"
+              },
+              {
+                "dimension": "mediaType",
+                "value": "chat"
+              },
+              {
+                "dimension": "mediaType", 
+                "value": "email"
+              }
+            ]
+          }
+        ],
         "conversationFilters": [],
         "evaluationFilters": [],
         "surveyFilters": [],
         "sessionFilters": []
       };
       
-      // Add media type filters - FIXED to match your other app's structure
-      body.segmentFilters.push({
-        "type": "or",
-        "predicates": [
-          {
-            "dimension": "mediaType",
-            "value": "voice"
-          },
-          {
-            "dimension": "mediaType",
-            "value": "chat"
-          },
-          {
-            "dimension": "mediaType", 
-            "value": "email"
-          }
-        ]
-      });
-      
-      // Add agent filter if agents selected - FIXED to match your other app's structure
+      // Add agent filter if agents selected - using the same structure as original
       if (agentIds && agentIds.length > 0) {
         body.conversationFilters.push({
           "type": "or",
@@ -1529,7 +1553,7 @@
       console.log('Fetching conversations with body:', JSON.stringify(body, null, 2));
       
       try {
-        // Get conversations - using your fetchJsonWithRetry function
+        // Get conversations
         const conversationsData = await fetchJsonWithRetry(url, {
           method: 'POST',
           body: JSON.stringify(body)
