@@ -1473,11 +1473,12 @@
     async function fetchConversationsAndSurveys(start, end, agentIds) {
       const url = `https://api.${config.REGION}/api/v2/analytics/conversations/details/query`;
       
-      // Format dates for API
+      // Format dates for API - FIXED to match your other app's format
+      // Ensure proper ISO 8601 format with timezone
       const startISO = start.toISOString();
       const endISO = end.toISOString();
       
-      // Build conversation query to get conversation details
+      // Build conversation query to get conversation details - FIXED to match your other app
       const body = {
         "interval": `${startISO}/${endISO}`,
         "order": "desc",
@@ -1486,32 +1487,33 @@
           "pageSize": 50,
           "pageNumber": 1
         },
-        "segmentFilters": [
-          {
-            "type": "or",
-            "predicates": [
-              {
-                "dimension": "mediaType",
-                "value": "voice"
-              },
-              {
-                "dimension": "mediaType",
-                "value": "chat"
-              },
-              {
-                "dimension": "mediaType", 
-                "value": "email"
-              }
-            ]
-          }
-        ],
+        "segmentFilters": [],
         "conversationFilters": [],
         "evaluationFilters": [],
         "surveyFilters": [],
         "sessionFilters": []
       };
       
-      // Add agent filter if agents selected
+      // Add media type filters - FIXED to match your other app's structure
+      body.segmentFilters.push({
+        "type": "or",
+        "predicates": [
+          {
+            "dimension": "mediaType",
+            "value": "voice"
+          },
+          {
+            "dimension": "mediaType",
+            "value": "chat"
+          },
+          {
+            "dimension": "mediaType", 
+            "value": "email"
+          }
+        ]
+      });
+      
+      // Add agent filter if agents selected - FIXED to match your other app's structure
       if (agentIds && agentIds.length > 0) {
         body.conversationFilters.push({
           "type": "or",
@@ -1527,7 +1529,7 @@
       console.log('Fetching conversations with body:', JSON.stringify(body, null, 2));
       
       try {
-        // Get conversations
+        // Get conversations - using your fetchJsonWithRetry function
         const conversationsData = await fetchJsonWithRetry(url, {
           method: 'POST',
           body: JSON.stringify(body)
